@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "298572800806",
+    "project_id": "frifalca-db",
+    "storage_bucket": "frifalca-db.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:298572800806:android:56be192e0ba49c3dc497e7",
+        "android_client_info": {
+          "package_name": "com.example.frifalca_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyApwDbXwb52JNDNURUdcw0ouRnRQGggM8Q"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
