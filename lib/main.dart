@@ -3,53 +3,39 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:local_auth/local_auth.dart';
 import 'package:flutter/material.dart';
-import 'package:shared_preferences/shared_preferences.dart'; // <--- ESTA ES LA QUE FALTA
-import 'dart:async'; // <--- PARA EVITAR ERRORES DE FUTURE
+import 'package:shared_preferences/shared_preferences.dart';
+import 'dart:async';
 import 'panel_principal.dart';
+import 'servicios_de_notificaciones.dart'; // Importar el servicio
 
 final LocalAuthentication auth = LocalAuthentication();
+final NotificationService _notificationService = NotificationService(); // Instancia del servicio
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp();
+  await _notificationService.initNotifications(); // Inicializar notificaciones
   runApp(const InicialSesion());
 }
 
 class InicialSesion extends StatelessWidget {
   const InicialSesion({super.key});
 
-  // This widget is the root of your application.
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Frifalca',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
       ),
       initialRoute: '/',
       home: StreamBuilder<User?>(
         stream: FirebaseAuth.instance.authStateChanges(),
         builder: (context, snapshot) {
-          // Si el snapshot tiene datos, el usuario ya está logueado
           if (snapshot.hasData) {
             return const PanelPrincipal();
           }
-          // Si no, mostrar login
           return const Login(title: 'Iniciar Sesión');
         },
       ),
@@ -69,17 +55,17 @@ class Login extends StatefulWidget {
 class _Login extends State<Login> {
   final TextEditingController _emailController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
+  final NotificationService _notificationService = NotificationService();
   bool _mantenerSesion = false;
   bool _oscurecerPassword = true;
   String? _usuarioRecordado;
   String? _correoRecordado;
   String? _passwordRecordado;
-  String _mensajeError = ""; // Para capturar errores sin romper la app
+  String _mensajeError = "";
 
   @override
   void initState() {
     super.initState();
-    // Usamos addPostFrameCallback para esperar a que el widget esté construido
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _cargarUsuarioRecordado();
     });
@@ -91,15 +77,12 @@ class _Login extends State<Login> {
     final correoGuardado = prefs.getString('correo_recordado');
     _passwordRecordado = prefs.getString('user_password');
 
-    // Siempre verificar mounted después de un await de SharedPreferences
     if (!mounted) return;
 
     if (nombreGuardado != null || correoGuardado != null) {
       setState(() {
-        // Priorizamos el nombre de usuario para el saludo, si no, el correo
         _usuarioRecordado = nombreGuardado ?? correoGuardado;
         _correoRecordado = correoGuardado;
-        // Autocompletamos el campo de texto con lo que el usuario usó la última vez
         _emailController.text = correoGuardado ?? "";
       });
     }
@@ -107,29 +90,26 @@ class _Login extends State<Login> {
 
   Future<void> _autenticarConHuella() async {
     try {
-      // 1. Verificamos disponibilidad
       bool puedeAutenticar =
         await auth.canCheckBiometrics || await auth.isDeviceSupported();
       if (!puedeAutenticar) return;
 
-      // 2. Autenticamos (Sintaxis corregida sin 'options')
       bool autenticado = await auth.authenticate(
         localizedReason: 'Usa tu huella para entrar a Frifalca',
       );
 
-      // 3. CONTROL CRÍTICO DE MONTAJE (Evita el error de dispose)
       if (!mounted) return;
 
-      if (autenticado &&
-          _correoRecordado != null &&
-          _passwordRecordado != null) {
+      if (autenticado && _correoRecordado != null && _passwordRecordado != null) {
         await FirebaseAuth.instance.signInWithEmailAndPassword(
           email: _correoRecordado!,
           password: _passwordRecordado!,
         );
+        // Guardar token después de la autenticación con huella
+        await _notificationService.saveTokenForCurrentUser();
       }
     } catch (e) {
-      if (!mounted) return; // Protección ante errores asíncronos
+      if (!mounted) return;
       setState(() {
         _mensajeError = "Error de huella: $e";
       });
@@ -137,7 +117,6 @@ class _Login extends State<Login> {
   }
 
   Future<void> _procesarLogin() async {
-    debugPrint("Botón presionado. Usuario: ${_emailController.text}");
     final messenger = ScaffoldMessenger.of(context);
     String input = _emailController.text.trim();
     String password = _passwordController.text.trim();
@@ -161,9 +140,8 @@ class _Login extends State<Login> {
       if (query.docs.isNotEmpty) {
         var datos = query.docs.first.data();
         emailFinal = datos['correo'];
-        nombreDeUsuarioParaGuardar = datos['usuario']; // <--- ESTO ASEGURA QUE SIEMPRE SEA EL NICKNAME
+        nombreDeUsuarioParaGuardar = datos['usuario'];
       } else if (!input.contains('@')) {
-        // Si no hay '@' y no se encontró en Firestore
         messenger.showSnackBar(const SnackBar(content: Text("Usuario no encontrado")));
         return;
       }
@@ -172,12 +150,13 @@ class _Login extends State<Login> {
         email: emailFinal,
         password: password,
       );
+
+      // Guardar token después del login
+      await _notificationService.saveTokenForCurrentUser();
       
-      // 2. Guardar el nombre para mostrar el "¡Hola, Usuario!" y habilitar huella
       final prefs = await SharedPreferences.getInstance();
       if (_mantenerSesion || _usuarioRecordado != null) {
         await prefs.setString('correo_recordado', emailFinal);
-        // Guardamos el 'usuario' extraído de Firestore, no el correo que escribió
         await prefs.setString('user_name', nombreDeUsuarioParaGuardar); 
         await prefs.setString('user_password', password);
       } else {
@@ -192,7 +171,6 @@ class _Login extends State<Login> {
     }
   }
 
-  // Traducción de errores DENTRO de la clase
   String _traducirError(String code) {
     switch (code) {
       case 'user-not-found':
@@ -215,12 +193,11 @@ class _Login extends State<Login> {
         child: Column(
           children: [
             Image.asset(
-              'assets/frifalca6.png', // Reemplaza con la ruta de tu imagen
-              height: 120,       // Ajusta el tamaño según necesites
+              'assets/frifalca6.png',
+              height: 120,
               fit: BoxFit.contain,
             ),
             const SizedBox(height: 10),
-            // 1. Saludo
             Text(
               _usuarioRecordado != null
                   ? "¡Hola, $_usuarioRecordado!"
@@ -229,7 +206,6 @@ class _Login extends State<Login> {
             ),
             const SizedBox(height: 20),
 
-            // 2. Correo y Checkbox (Solo si es login nuevo)
             if (_usuarioRecordado == null) ...[
               TextField(
                 controller: _emailController,
@@ -241,13 +217,12 @@ class _Login extends State<Login> {
             ],
             
             const SizedBox(height: 20),
-            // 3. Contraseña (Siempre visible)
             TextField(
               controller: _passwordController,
               obscureText: _oscurecerPassword,
               decoration: InputDecoration(
                 labelText: "Contraseña",
-                border: OutlineInputBorder(),
+                border: const OutlineInputBorder(),
                 suffixIcon: IconButton(
                   icon: Icon(
                     _oscurecerPassword ? Icons.visibility_off : Icons.visibility,
@@ -267,7 +242,6 @@ class _Login extends State<Login> {
                 onChanged: (val) => setState(() => _mantenerSesion = val!),
               ), 
 
-            // 4. Botón Entrar (Uno solo y después de los campos)
             ElevatedButton(
               style: ElevatedButton.styleFrom(
                 minimumSize: const Size(double.infinity, 50),
@@ -276,7 +250,6 @@ class _Login extends State<Login> {
               child: const Text("Entrar"),
             ),
 
-            // 5. Error y Biometría
             if (_mensajeError.isNotEmpty)
               Padding(
                 padding: const EdgeInsets.all(8.0),

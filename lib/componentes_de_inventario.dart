@@ -17,8 +17,16 @@ class InventarioResumenCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     int totalGeneral = totalSacos + totalBolsas;
-    // Color azul celeste "hielo"
     final Color azulHielo = Colors.lightBlue[300]!;
+
+    String? alertMessage;
+    if (totalSacos <= 0 && totalBolsas <= 0) {
+      alertMessage = "⚠️ TRABAJANDO SIN STOCK: No hay bolsas ni sacos disponibles";
+    } else if (totalSacos <= 0) {
+      alertMessage = "⚠️ STOCK CRÍTICO: Sacos de Hielo agotado";
+    } else if (totalBolsas <= 0) {
+      alertMessage = "⚠️ STOCK CRÍTICO: Bolsas de Hielo agotado";
+    }
 
     return Card(
       elevation: 4,
@@ -28,16 +36,15 @@ class InventarioResumenCard extends StatelessWidget {
           ExpansionTile(
             leading: Icon(Icons.ac_unit, color: azulHielo, size: 30),
             title: Text("Inventario Actual", 
-              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18, color: Colors.blue[900])),
+              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18, color: Colors.blue[900]!)),
             subtitle: Text("Total unidades: $totalGeneral\nPresionar para más información",
-              style: TextStyle(fontSize: 12, fontStyle: FontStyle.italic)),
+              style: const TextStyle(fontSize: 12, fontStyle: FontStyle.italic)),
             children: [
               _itemProducto(context, "Sacos de Hielo", totalSacos, "NZAtCFwTfLTwb3xiiOUk"),
               _itemProducto(context, "Bolsas de Hielo", totalBolsas, "DWDbVnRf5nqGu8uTu3KA"),
             ],
           ),
-          // Aviso debajo del modal si alguno está en cero
-          if (totalSacos <= 0 || totalBolsas <= 0)
+          if (alertMessage != null)
             Container(
               width: double.infinity,
               padding: const EdgeInsets.symmetric(vertical: 8),
@@ -45,15 +52,10 @@ class InventarioResumenCard extends StatelessWidget {
                 color: Colors.red[50]!,
                 borderRadius: const BorderRadius.vertical(bottom: Radius.circular(15)),
               ),
-              child: Column(
-                children: [
-                  if (totalSacos <= 0)
-                    const Text("⚠️ Trabajando sin stock en SACO", 
-                      style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold)),
-                  if (totalBolsas <= 0)
-                    const Text("⚠️ Trabajando sin stock en BOLSA", 
-                      style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold)),
-                ],
+              child: Text(
+                alertMessage,
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.red, fontWeight: FontWeight.bold),
               ),
             ),
         ],
@@ -113,13 +115,12 @@ class InventarioResumenCard extends StatelessWidget {
 }
 
 class ListaPedidosPendientes extends StatelessWidget {
-  final List<Pedido> pedidos; // Recibiremos los pedidos desde el panel principal
+  final List<Pedido> pedidos;
 
   const ListaPedidosPendientes({super.key, required this.pedidos});
 
   @override
   Widget build(BuildContext context) {
-    // Filtramos solo los que están en estado 'Pendiente'
     final pendientes = pedidos.where((p) => p.estado == 'Pendiente').toList();
 
     return Column(
@@ -135,7 +136,7 @@ class ListaPedidosPendientes extends StatelessWidget {
         if (pendientes.isEmpty)
           const Center(child: Text("No hay pedidos pendientes")),
         ListView.builder(
-          shrinkWrap: true, // Importante para que funcione dentro de un SingleChildScrollView
+          shrinkWrap: true, 
           physics: const NeverScrollableScrollPhysics(),
           itemCount: pendientes.length,
           itemBuilder: (context, index) {
