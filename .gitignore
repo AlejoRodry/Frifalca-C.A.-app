@@ -28,3 +28,9 @@ node_modules/
 *.iws
 .DS_Store
 *.log
+
+# Archivos basura detectados
+Get
+Run
+flutter
+pub_outdated.txt
