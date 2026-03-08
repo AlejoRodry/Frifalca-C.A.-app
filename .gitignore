@@ -7,6 +7,9 @@ pubspec.lock
 doc/api/
 .flutter-plugins
 .flutter-plugins-dependencies
+.firebase/
+.firebaserc
+node_modules/
 
 # Archivos de entorno y temporales
 .env*

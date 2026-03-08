@@ -16,63 +16,165 @@ class InventarioResumenCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    int totalGeneral = totalSacos + totalBolsas;
-    // Color azul celeste "hielo"
-    final Color azulHielo = Colors.lightBlue[300]!;
-
-    return Card(
-      elevation: 4,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
-      child: Column(
-        children: [
-          ExpansionTile(
-            leading: Icon(Icons.ac_unit, color: azulHielo, size: 30),
-            title: Text("Inventario Actual", 
-              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18, color: Colors.blue[900])),
-            subtitle: Text("Total unidades: $totalGeneral\nPresionar para más información",
-              style: TextStyle(fontSize: 12, fontStyle: FontStyle.italic)),
-            children: [
-              _itemProducto(context, "Sacos de Hielo", totalSacos, "NZAtCFwTfLTwb3xiiOUk"),
-              _itemProducto(context, "Bolsas de Hielo", totalBolsas, "DWDbVnRf5nqGu8uTu3KA"),
-            ],
+    bool stockCritico = totalSacos <= 0 || totalBolsas <= 0;
+    return Container(
+      width: double.infinity,
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: stockCritico
+              ? [const Color(0xFFF2994A), const Color(0xFFF2C94C)] // Naranja
+              : [const Color(0xFF4FACFE), const Color(0xFF00F2FE)], // Azul
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(30),
+        boxShadow: [
+          BoxShadow(
+            color:
+                (stockCritico
+                        ? const Color(0xFFF2994A)
+                        : const Color(0xFF4FACFE))
+                    .withValues(alpha: 0.3),
+            blurRadius: 20,
+            offset: const Offset(0, 10),
           ),
-          // Aviso debajo del modal si alguno está en cero
-          if (totalSacos <= 0 || totalBolsas <= 0)
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.symmetric(vertical: 8),
-              decoration: BoxDecoration(
-                color: Colors.red[50]!,
-                borderRadius: const BorderRadius.vertical(bottom: Radius.circular(15)),
-              ),
-              child: Column(
-                children: [
-                  if (totalSacos <= 0)
-                    const Text("⚠️ Trabajando sin stock en SACO", 
-                      style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold)),
-                  if (totalBolsas <= 0)
-                    const Text("⚠️ Trabajando sin stock en BOLSA", 
-                      style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold)),
-                ],
-              ),
-            ),
         ],
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(25),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Row(
+              children: [
+                Icon(Icons.inventory_2_rounded, color: Colors.white, size: 28),
+                SizedBox(width: 12),
+                Text(
+                  "Control de Inventario",
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 20,
+                    color: Colors.white,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 20),
+            _itemProducto(
+              context,
+              "Sacos de Hielo",
+              totalSacos,
+              "NZAtCFwTfLTwb3xiiOUk",
+            ),
+            const SizedBox(height: 10),
+            _itemProducto(
+              context,
+              "Bolsas de Hielo",
+              totalBolsas,
+              "DWDbVnRf5nqGu8uTu3KA",
+            ),
+            // Aviso compacto debajo si alguno está en cero
+            if (totalSacos <= 0 || totalBolsas <= 0) ...[
+              const SizedBox(height: 15),
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  vertical: 8,
+                  horizontal: 12,
+                ),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Column(
+                  children: [
+                    if (totalSacos <= 0)
+                      const Row(
+                        children: [
+                          Icon(
+                            Icons.warning_amber_rounded,
+                            color: Colors.white,
+                            size: 16,
+                          ),
+                          SizedBox(width: 8),
+                          Text(
+                            "Sin stock en SACO",
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+                    if (totalSacos <= 0 && totalBolsas <= 0)
+                      const SizedBox(height: 4),
+                    if (totalBolsas <= 0)
+                      const Row(
+                        children: [
+                          Icon(
+                            Icons.warning_amber_rounded,
+                            color: Colors.white,
+                            size: 16,
+                          ),
+                          SizedBox(width: 8),
+                          Text(
+                            "Sin stock en BOLSA",
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ],
+        ),
       ),
     );
   }
 
-  Widget _itemProducto(BuildContext context, String nombre, int cantidad, String id) {
+  Widget _itemProducto(
+    BuildContext context,
+    String nombre,
+    int cantidad,
+    String id,
+  ) {
     bool sinStock = cantidad <= 0;
-    return ListTile(
-      title: Text(nombre, style: TextStyle(color: sinStock ? Colors.red : Colors.black)),
-      subtitle: sinStock ? const Text("Trabajando sin stock", style: TextStyle(color: Colors.red)) : null,
-      trailing: Row(
-        mainAxisSize: MainAxisSize.min,
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(15),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Text("$cantidad", 
-            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: sinStock ? Colors.red : Colors.black)),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                nombre,
+                style: const TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: Colors.white,
+                  fontSize: 16,
+                ),
+              ),
+              Text(
+                sinStock ? "Sin unidades" : "Disponibles: $cantidad",
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.8),
+                  fontSize: 12,
+                ),
+              ),
+            ],
+          ),
           IconButton(
-            icon: const Icon(Icons.edit, color: Colors.blueGrey),
+            icon: const Icon(Icons.edit_note_rounded, color: Colors.white),
             onPressed: () => _mostrarDialogoAjuste(context, nombre, id),
           ),
         ],
@@ -95,7 +197,10 @@ class InventarioResumenCard extends StatelessWidget {
           ),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text("Cancelar")),
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text("Cancelar"),
+          ),
           ElevatedButton(
             onPressed: () {
               int? valor = int.tryParse(cantidadCtrl.text);
@@ -113,13 +218,19 @@ class InventarioResumenCard extends StatelessWidget {
 }
 
 class ListaPedidosPendientes extends StatelessWidget {
-  final List<Pedido> pedidos; // Recibiremos los pedidos desde el panel principal
+  final List<Pedido> pedidos;
+  final int stockSacoDisp;
+  final int stockBolsaDisp;
 
-  const ListaPedidosPendientes({super.key, required this.pedidos});
+  const ListaPedidosPendientes({
+    super.key,
+    required this.pedidos,
+    this.stockSacoDisp = 0,
+    this.stockBolsaDisp = 0,
+  });
 
   @override
   Widget build(BuildContext context) {
-    // Filtramos solo los que están en estado 'Pendiente'
     final pendientes = pedidos.where((p) => p.estado == 'Pendiente').toList();
 
     return Column(
@@ -135,29 +246,146 @@ class ListaPedidosPendientes extends StatelessWidget {
         if (pendientes.isEmpty)
           const Center(child: Text("No hay pedidos pendientes")),
         ListView.builder(
-          shrinkWrap: true, // Importante para que funcione dentro de un SingleChildScrollView
+          shrinkWrap: true,
           physics: const NeverScrollableScrollPhysics(),
           itemCount: pendientes.length,
           itemBuilder: (context, index) {
             final pedido = pendientes[index];
-            return Card(
-              margin: const EdgeInsets.only(bottom: 8),
-              child: ListTile(
-                leading: const Icon(Icons.timer, color: Colors.orange),
-                title: Text("Ticket: ${pedido.ticket}"),
-                subtitle: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+
+            // 2. Lógica de Colores Reactiva (Basada en el campo sinStock de Firestore)
+            final bool requiereProduccion = pedido.sinStock;
+
+            final Color colorEnfoque = requiereProduccion
+                ? const Color(0xFFFFC107)
+                : const Color(0xFF4CAF50); // Naranja Ambar / Verde
+            final String statusTexto = requiereProduccion
+                ? "PROCESANDO"
+                : "COMPLETADO";
+            final Color badgeBg = colorEnfoque.withValues(alpha: 0.12);
+
+            return Container(
+              margin: const EdgeInsets.only(bottom: 16),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(25),
+                boxShadow: [
+                  BoxShadow(
+                    color: colorEnfoque.withValues(alpha: 0.08),
+                    blurRadius: 15,
+                    offset: const Offset(0, 5),
+                  ),
+                ],
+              ),
+              child: IntrinsicHeight(
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    Text("Producto: ${pedido.tipoHielo}"),
-                    Text("Creado por: ${pedido.creadoPor ?? 'No asignado'}", 
-                      style: const TextStyle(fontWeight: FontWeight.w500, color: Colors.blueGrey)),
-                      if (pedido.despachadoPor != null)
-                        Text("Despachado por: ${pedido.despachadoPor}", 
-                          style: const TextStyle(color: Colors.green)),
+                    // --- ACERTO LATERAL DE COLOR ---
+                    Container(
+                      width: 8,
+                      decoration: BoxDecoration(
+                        color: colorEnfoque,
+                        borderRadius: const BorderRadius.only(
+                          topLeft: Radius.circular(25),
+                          bottomLeft: Radius.circular(25),
+                        ),
+                      ),
+                    ),
+                    Expanded(
+                      child: Padding(
+                        padding: const EdgeInsets.all(20),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Text(
+                                  "PEDIDO #${pedido.ticket}",
+                                  style: TextStyle(
+                                    color: Colors.blueGrey[300],
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.bold,
+                                    letterSpacing: 1,
+                                  ),
+                                ),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 12,
+                                    vertical: 6,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: badgeBg,
+                                    borderRadius: BorderRadius.circular(10),
+                                  ),
+                                  child: Text(
+                                    statusTexto,
+                                    style: TextStyle(
+                                      color: colorEnfoque,
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.bold,
+                                      letterSpacing: 0.5,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 12),
+                            Row(
+                              children: [
+                                Icon(
+                                  Icons.shopping_bag_rounded,
+                                  color: Colors.cyan[400],
+                                  size: 20,
+                                ),
+                                const SizedBox(width: 8),
+                                Text(
+                                  "${pedido.cantSaco > 0 ? '${pedido.cantSaco} sacos' : ''}${pedido.cantSaco > 0 && pedido.cantBolsa > 0 ? ' + ' : ''}${pedido.cantBolsa > 0 ? '${pedido.cantBolsa} bolsas' : ''}",
+                                  style: const TextStyle(
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.bold,
+                                    color: Color(0xFF2C3E50),
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 8),
+                            RichText(
+                              text: TextSpan(
+                                children: [
+                                  TextSpan(
+                                    text: "Tipo: ",
+                                    style: TextStyle(
+                                      color: Colors.grey[500],
+                                      fontSize: 13,
+                                    ),
+                                  ),
+                                  TextSpan(
+                                    text: pedido.tipoHielo,
+                                    style: const TextStyle(
+                                      color: Color(0xFF2C3E50),
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(height: 12),
+                            Text(
+                              "Total: ${pedido.monto.toStringAsFixed(0)} bs",
+                              style: const TextStyle(
+                                fontSize: 18,
+                                fontWeight: FontWeight.bold,
+                                color: Color(0xFF1A1A1A),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
                   ],
                 ),
-                trailing: Text("${pedido.monto} Bs", 
-                  style: const TextStyle(fontWeight: FontWeight.bold)),
               ),
             );
           },
