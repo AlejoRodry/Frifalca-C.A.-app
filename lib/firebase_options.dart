@@ -66,5 +66,4 @@ class DefaultFirebaseOptions {
     storageBucket: 'frifalca-db.firebasestorage.app',
     measurementId: 'G-MNPYZ2QSFS',
   );
-
 }

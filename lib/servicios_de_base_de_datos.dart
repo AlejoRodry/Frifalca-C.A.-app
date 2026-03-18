@@ -22,7 +22,8 @@ class DatabaseService {
           'token': token,
           'email': user.email,
           'ultima_actualizacion': FieldValue.serverTimestamp(),
-        });
+          'ultima_modificacion': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
       }
     } catch (e) {
       debugPrint("Error al guardar token: $e");
@@ -34,7 +35,7 @@ class DatabaseService {
     debugPrint("Simulación de notificación (Backend requerido): $titulo");
   }
 
-  // --- BITÁCORA (Privada) ---
+  // --- BITÁCORA (Privada para escritura) ---
   Future<void> _registrarEvento({
     required String accion,
     required String detalle,
@@ -43,13 +44,77 @@ class DatabaseService {
       final user = FirebaseAuth.instance.currentUser;
       await _db.collection('Bitacora').add({
         'accion': accion,
-        'detalle': detalle,
-        'fecha': FieldValue.serverTimestamp(),
         'usuario': user?.email ?? 'Desconocido',
+        'nombre_usuario': user?.displayName ?? 'Usuario',
+        'fecha': FieldValue.serverTimestamp(),
+        'detalle': detalle,
+        'ultima_modificacion': FieldValue.serverTimestamp(),
       });
     } catch (e) {
       debugPrint("Error al registrar en bitácora: $e");
     }
+  }
+
+  // --- BITÁCORA (Lectura Protegida) ---
+  Stream<QuerySnapshot> streamBitacora({
+    String? filtroNombre,
+    String? filtroCorreo,
+    String? filtroAccion,
+  }) {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null || user.email == null) {
+      debugPrint(
+        "ADVERTENCIA: Intento de lectura de bitácora sin sesión activa.",
+      );
+      return const Stream.empty();
+    }
+
+    // Validamos el rol de admin consultando Firestore antes de exponer el stream de Bitacora
+    return _db
+        .collection('Trabajadores')
+        .where('correo', isEqualTo: user.email)
+        .limit(1)
+        .snapshots()
+        .asyncExpand((userSnap) {
+          if (userSnap.docs.isEmpty) {
+            debugPrint("ADVERTENCIA: No se encontró perfil para ${user.email}");
+            return const Stream.empty();
+          }
+
+          final data = userSnap.docs.first.data();
+          final String rol = data['rol'] ?? 'Empleado';
+
+          if (rol != 'admin') {
+            debugPrint(
+              "SEGURIDAD: Acceso denegado a Bitácora para el usuario: ${user.email} con rol: $rol",
+            );
+            return const Stream.empty();
+          }
+
+          // Construcción de la consulta con filtros compuestos solicitados
+          Query query = _db
+              .collection('Bitacora')
+              .orderBy('fecha', descending: true);
+
+          if (filtroNombre != null && filtroNombre.isNotEmpty) {
+            query = _db
+                .collection('Bitacora')
+                .where('nombre_usuario', isEqualTo: filtroNombre)
+                .orderBy('fecha', descending: true);
+          } else if (filtroCorreo != null && filtroCorreo.isNotEmpty) {
+            query = _db
+                .collection('Bitacora')
+                .where('usuario', isEqualTo: filtroCorreo)
+                .orderBy('fecha', descending: true);
+          } else if (filtroAccion != null && filtroAccion.isNotEmpty) {
+            query = _db
+                .collection('Bitacora')
+                .where('accion', isEqualTo: filtroAccion)
+                .orderBy('fecha', descending: true);
+          }
+
+          return query.snapshots();
+        });
   }
 
   // --- GESTIÓN DE CLIENTES ---
@@ -66,6 +131,7 @@ class DatabaseService {
         'fecha_registro': FieldValue.serverTimestamp(),
         'numero_visitas': 0,
         'llave_busqueda': "${nombre.toLowerCase()} ${apellido.toLowerCase()}",
+        'ultima_modificacion': FieldValue.serverTimestamp(),
       });
       await _registrarEvento(
         accion: 'CLIENTE_REGISTRADO',
@@ -85,16 +151,16 @@ class DatabaseService {
   }) async {
     try {
       // Usamos el correo como ID del documento temporal para facilitar la búsqueda al registrarse
-      await _db
-          .collection('PreAutorizaciones')
-          .doc(correo.toLowerCase().trim())
-          .set({
-            'correo': correo.toLowerCase().trim(),
-            'nombre': nombre,
-            'apellido': apellido,
-            'rol': rol,
-            'fecha_preautorizacion': FieldValue.serverTimestamp(),
-          });
+      final String emailId = correo.toLowerCase().replaceAll(' ', '');
+      await _db.collection('PreAutorizaciones').doc(emailId).set({
+        'email': emailId,
+        'nombre': nombre,
+        'apellido': apellido,
+        'rol': rol,
+        'status': 'pending',
+        'createdAt': FieldValue.serverTimestamp(),
+        'ultima_modificacion': FieldValue.serverTimestamp(),
+      });
 
       await _registrarEvento(
         accion: 'USUARIO_PREAUTORIZADO',
@@ -137,6 +203,7 @@ class DatabaseService {
           'cargo': 'Personal', // Campo sugerido por el usuario
           'fecha_registro': FieldValue.serverTimestamp(),
           'completado': true,
+          'ultima_modificacion': FieldValue.serverTimestamp(),
         });
 
         // Eliminar pre-autorización ya usada
@@ -158,6 +225,7 @@ class DatabaseService {
           'cargo': 'Sin asignar',
           'fecha_registro': FieldValue.serverTimestamp(),
           'completado': false,
+          'ultima_modificacion': FieldValue.serverTimestamp(),
         });
       }
     } catch (e) {
@@ -202,30 +270,70 @@ class DatabaseService {
     int? cantSaco,
     int? cantBolsa,
   }) async {
-    final batch = _db.batch();
-    batch.update(_db.collection('Pedidos').doc(idDoc), {
-      'estado': 'Cancelado',
-      'fecha_cancelacion': FieldValue.serverTimestamp(),
-      'cancelado_por': FirebaseAuth.instance.currentUser?.email,
-    });
+    try {
+      final batch = _db.batch();
+      debugPrint("DEBUG: Intentando cancelar pedido $idDoc");
 
-    // Liberar stock comprometido
-    if (cantSaco != null && cantSaco > 0) {
-      batch.update(_db.collection('Productos').doc("NZAtCFwTfLTwb3xiiOUk"), {
-        'stock_comprometido': FieldValue.increment(-cantSaco),
+      batch.update(_db.collection('Pedidos').doc(idDoc), {
+        'estado': 'Cancelado',
+        'fecha_cancelacion': FieldValue.serverTimestamp(),
+        'cancelado_por': FirebaseAuth.instance.currentUser?.email,
+        'ultima_modificacion': FieldValue.serverTimestamp(),
       });
-    }
-    if (cantBolsa != null && cantBolsa > 0) {
-      batch.update(_db.collection('Productos').doc("DWDbVnRf5nqGu8uTu3KA"), {
-        'stock_comprometido': FieldValue.increment(-cantBolsa),
-      });
-    }
-    await batch.commit();
 
-    await _registrarEvento(
-      accion: 'PEDIDO_CANCELADO',
-      detalle: 'Pedido ID: $idDoc marcado como Cancelado.',
-    );
+      // Liberar stock comprometido
+      if (cantSaco != null && cantSaco > 0) {
+        const idProdSaco = "NZAtCFwTfLTwb3xiiOUk";
+        debugPrint(
+          "DEBUG: Incrementando stock_comprometido en $idProdSaco por ${-cantSaco}",
+        );
+
+        // Verificación de consistencia: ¿Existe el campo?
+        final snap = await _db.collection('Productos').doc(idProdSaco).get();
+        if (!snap.exists ||
+            !(snap.data() as Map).containsKey('stock_comprometido')) {
+          debugPrint(
+            "ADVERTENCIA: El campo 'stock_comprometido' no existe en $idProdSaco. Inicializando...",
+          );
+          batch.update(snap.reference, {'stock_comprometido': 0});
+        }
+
+        batch.update(_db.collection('Productos').doc(idProdSaco), {
+          'stock_comprometido': FieldValue.increment(-cantSaco),
+        });
+      }
+
+      if (cantBolsa != null && cantBolsa > 0) {
+        const idProdBolsa = "DWDbVnRf5nqGu8uTu3KA";
+        debugPrint(
+          "DEBUG: Incrementando stock_comprometido en $idProdBolsa por ${-cantBolsa}",
+        );
+
+        final snap = await _db.collection('Productos').doc(idProdBolsa).get();
+        if (!snap.exists ||
+            !(snap.data() as Map).containsKey('stock_comprometido')) {
+          debugPrint(
+            "ADVERTENCIA: El campo 'stock_comprometido' no existe en $idProdBolsa. Inicializando...",
+          );
+          batch.update(snap.reference, {'stock_comprometido': 0});
+        }
+
+        batch.update(_db.collection('Productos').doc(idProdBolsa), {
+          'stock_comprometido': FieldValue.increment(-cantBolsa),
+        });
+      }
+
+      await batch.commit();
+
+      await _registrarEvento(
+        accion: 'PEDIDO_CANCELADO',
+        detalle: 'Pedido ID: $idDoc marcado como Cancelado.',
+      );
+    } catch (e, stack) {
+      debugPrint("ERROR CRÍTICO en cancelarPedido: $e");
+      debugPrint("STACKTRACE: $stack");
+      rethrow;
+    }
   }
 
   Future<void> despacharPedido(
@@ -234,34 +342,100 @@ class DatabaseService {
     int? cantSaco,
     int? cantBolsa,
   }) async {
-    final batch = _db.batch();
-    batch.update(_db.collection('Pedidos').doc(idDoc), {
-      'estado': 'Despachado',
-      'despachado_por': nombreDespachador,
-      'fecha_despacho': FieldValue.serverTimestamp(),
-    });
+    try {
+      final batch = _db.batch();
+      debugPrint(
+        "DEBUG: Intentando despachar pedido $idDoc por $nombreDespachador",
+      );
 
-    // Restar de físico y liberar compromiso
-    if (cantSaco != null && cantSaco > 0) {
-      final ref = _db.collection('Productos').doc("NZAtCFwTfLTwb3xiiOUk");
-      batch.update(ref, {
-        'stock_fisico': FieldValue.increment(-cantSaco),
-        'stock_comprometido': FieldValue.increment(-cantSaco),
+      batch.update(_db.collection('Pedidos').doc(idDoc), {
+        'estado': 'Despachado',
+        'despachado_por': nombreDespachador,
+        'fecha_despacho': FieldValue.serverTimestamp(),
+        'ultima_modificacion': FieldValue.serverTimestamp(),
       });
-    }
-    if (cantBolsa != null && cantBolsa > 0) {
-      final ref = _db.collection('Productos').doc("DWDbVnRf5nqGu8uTu3KA");
-      batch.update(ref, {
-        'stock_fisico': FieldValue.increment(-cantBolsa),
-        'stock_comprometido': FieldValue.increment(-cantBolsa),
-      });
-    }
-    await batch.commit();
 
-    await _registrarEvento(
-      accion: 'PEDIDO_DESPACHADO',
-      detalle: 'Pedido ID: $idDoc despachado por $nombreDespachador.',
-    );
+      // Restar de físico y liberar compromiso
+      if (cantSaco != null && cantSaco > 0) {
+        const idProdSaco = "NZAtCFwTfLTwb3xiiOUk";
+        debugPrint("DEBUG: Despachando Saco ($idProdSaco): cantidad $cantSaco");
+
+        final ref = _db.collection('Productos').doc(idProdSaco);
+        final snap = await ref.get();
+
+        if (!snap.exists) {
+          debugPrint("ERROR: El producto $idProdSaco no existe.");
+        } else {
+          final data = snap.data() as Map?;
+          Map<String, dynamic> initData = {};
+          if (!data!.containsKey('stock_fisico')) {
+            debugPrint(
+              "ADVERTENCIA: 'stock_fisico' no existe en $idProdSaco. Inicializando...",
+            );
+            initData['stock_fisico'] = 0;
+          }
+          if (!data.containsKey('stock_comprometido')) {
+            debugPrint(
+              "ADVERTENCIA: 'stock_comprometido' no existe en $idProdSaco. Inicializando...",
+            );
+            initData['stock_comprometido'] = 0;
+          }
+          if (initData.isNotEmpty) batch.update(ref, initData);
+        }
+
+        // Escritura segura: Ambos campos en una sola operación
+        batch.update(ref, {
+          'stock_fisico': FieldValue.increment(-cantSaco),
+          'stock_comprometido': FieldValue.increment(-cantSaco),
+        });
+      }
+
+      if (cantBolsa != null && cantBolsa > 0) {
+        const idProdBolsa = "DWDbVnRf5nqGu8uTu3KA";
+        debugPrint(
+          "DEBUG: Despachando Bolsa ($idProdBolsa): cantidad $cantBolsa",
+        );
+
+        final ref = _db.collection('Productos').doc(idProdBolsa);
+        final snap = await ref.get();
+
+        if (!snap.exists) {
+          debugPrint("ERROR: El producto $idProdBolsa no existe.");
+        } else {
+          final data = snap.data() as Map?;
+          Map<String, dynamic> initData = {};
+          if (!data!.containsKey('stock_fisico')) {
+            debugPrint(
+              "ADVERTENCIA: 'stock_fisico' no existe en $idProdBolsa. Inicializando...",
+            );
+            initData['stock_fisico'] = 0;
+          }
+          if (!data.containsKey('stock_comprometido')) {
+            debugPrint(
+              "ADVERTENCIA: 'stock_comprometido' no existe en $idProdBolsa. Inicializando...",
+            );
+            initData['stock_comprometido'] = 0;
+          }
+          if (initData.isNotEmpty) batch.update(ref, initData);
+        }
+
+        batch.update(ref, {
+          'stock_fisico': FieldValue.increment(-cantBolsa),
+          'stock_comprometido': FieldValue.increment(-cantBolsa),
+        });
+      }
+
+      await batch.commit();
+
+      await _registrarEvento(
+        accion: 'PEDIDO_DESPACHADO',
+        detalle: 'Pedido ID: $idDoc despachado por $nombreDespachador.',
+      );
+    } catch (e, stack) {
+      debugPrint("ERROR CRÍTICO en despacharPedido: $e");
+      debugPrint("STACKTRACE: $stack");
+      rethrow;
+    }
   }
 
   Future<void> ajustarStock(
@@ -269,24 +443,51 @@ class DatabaseService {
     int cambio,
     String nombreUsuario,
   ) async {
-    final FirebaseFirestore db = FirebaseFirestore.instance;
+    try {
+      debugPrint(
+        "DEBUG: Ajustando stock de $idDoc con cambio: $cambio por $nombreUsuario",
+      );
 
-    // 1. Actualizar el stock físico
-    await db.collection('Productos').doc(idDoc).update({
-      'stock_fisico': FieldValue.increment(cambio),
-    });
+      // Verificación previa e inicialización
+      final snap = await _db.collection('Productos').doc(idDoc).get();
+      if (!snap.exists) {
+        debugPrint(
+          "ERROR: El producto $idDoc no existe al intentar ajustar stock.",
+        );
+      } else if (!(snap.data() as Map).containsKey('stock_fisico')) {
+        debugPrint(
+          "ADVERTENCIA: 'stock_fisico' no existe en $idDoc. Inicializando en 0...",
+        );
+        await _db.collection('Productos').doc(idDoc).update({
+          'stock_fisico': 0,
+        });
+      }
 
-    // 2. Registrar en historial
-    await db.collection('Historial_Inventario').add({
-      'producto_id': idDoc,
-      'cantidad_añadida': cambio,
-      'usuario': nombreUsuario,
-      'fecha': FieldValue.serverTimestamp(),
-      'tipo': 'Carga de Inventario',
-    });
+      // 1. Actualizar el stock físico (Usando .set con merge para robustez en Web)
+      debugPrint("Intentando escribir en Productos ($idDoc)...");
+      await _db.collection('Productos').doc(idDoc).set({
+        'stock_fisico': FieldValue.increment(cambio),
+        'ultima_modificacion': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+      debugPrint("¡Éxito en la actualización de stock!");
+
+      // 2. Registrar en historial
+      await _db.collection('Historial_Inventario').add({
+        'producto_id': idDoc,
+        'cantidad_añadida': cambio,
+        'usuario': nombreUsuario,
+        'fecha': FieldValue.serverTimestamp(),
+        'tipo': 'Carga de Inventario',
+        'ultima_modificacion': FieldValue.serverTimestamp(),
+      });
+    } catch (e, stack) {
+      debugPrint("ERROR CRÍTICO en ajustarStock: $e");
+      debugPrint("STACKTRACE: $stack");
+      rethrow;
+    }
 
     // 3. RE-ESCANEO REACTIVO (Trigger): Buscar pedidos "Naranja"
-    final pedidosNaranja = await db
+    final pedidosNaranja = await _db
         .collection('Pedidos')
         .where('estado', isEqualTo: 'Pendiente')
         .where('sin_stock', isEqualTo: true)
@@ -294,29 +495,35 @@ class DatabaseService {
 
     if (pedidosNaranja.docs.isNotEmpty) {
       // Obtenemos los stocks actuales actualizados
-      final prodDocs = await db.collection('Productos').get();
+      final prodDocs = await _db.collection('Productos').get();
       Map<String, int> stocksDisponibles = {};
 
       for (var d in prodDocs.docs) {
         final data = d.data();
-        int fisico = data['stock_fisico'] ?? 0;
-        int comp = data['stock_comprometido'] ?? 0;
+        int fisico = (data['stock_fisico'] as num? ?? 0).toInt();
+        int comp = (data['stock_comprometido'] as num? ?? 0).toInt();
         stocksDisponibles[d.id] = fisico - comp;
       }
 
-      WriteBatch batch = db.batch();
+      WriteBatch batch = _db.batch();
       bool huboCambios = false;
 
       for (var pedidoDoc in pedidosNaranja.docs) {
         final data = pedidoDoc.data();
-        int reqSaco = data['tipo_hielo']?['cantidad_saco'] ?? 0;
-        int reqBolsa = data['tipo_hielo']?['cantidad_bolsa'] ?? 0;
+        int reqSaco = (data['tipo_hielo']?['cantidad_saco'] as num? ?? 0)
+            .toInt();
+        int reqBolsa = (data['tipo_hielo']?['cantidad_bolsa'] as num? ?? 0)
+            .toInt();
 
         int dispSaco = stocksDisponibles["NZAtCFwTfLTwb3xiiOUk"] ?? 0;
         int dispBolsa = stocksDisponibles["DWDbVnRf5nqGu8uTu3KA"] ?? 0;
 
-        // Si ahora hay stock suficiente, pasa a Normal (sin_stock: false)
-        if (dispSaco >= reqSaco && dispBolsa >= reqBolsa) {
+        // Un pedido deja de estar "Sin Stock" si para cada producto que requiere,
+        // el stock físico es suficiente para cubrir el stock comprometido total.
+        bool sacoOk = (reqSaco == 0 || dispSaco >= 0);
+        bool bolsaOk = (reqBolsa == 0 || dispBolsa >= 0);
+
+        if (sacoOk && bolsaOk) {
           batch.update(pedidoDoc.reference, {'sin_stock': false});
           huboCambios = true;
         }
@@ -335,65 +542,107 @@ class DatabaseService {
     required String nombreCreador,
     String? idCliente,
   }) async {
-    WriteBatch batch = _db.batch();
+    try {
+      WriteBatch batch = _db.batch();
+      debugPrint(
+        "DEBUG: Iniciando creación de pedido. Ticket: $ticket, Creador: $nombreCreador",
+      );
 
-    // 1. Verificar si falta stock para marcar el pedido (PCA Logic)
-    bool faltaStock = false;
-    for (var entry in productosYCantidades.entries) {
-      DocumentSnapshot snap = await _db
-          .collection('Productos')
-          .doc(entry.key)
-          .get();
-      final data = snap.data() as Map<String, dynamic>?;
-      int fisico = data?['stock_fisico'] ?? 0;
-      int comprometido = data?['stock_comprometido'] ?? 0;
-      int disponible = fisico - comprometido;
+      // 1. Verificar si falta stock para marcar el pedido (PCA Logic)
+      bool faltaStock = false;
+      for (var entry in productosYCantidades.entries) {
+        debugPrint(
+          "DEBUG: Validando stock para producto ${entry.key} | Cantidad pedida: ${entry.value}",
+        );
 
-      if (disponible < entry.value) {
-        faltaStock = true;
-        break;
+        DocumentSnapshot snap = await _db
+            .collection('Productos')
+            .doc(entry.key)
+            .get();
+
+        if (!snap.exists) {
+          debugPrint("ERROR: El producto ${entry.key} NO EXISTE en Firestore.");
+          continue;
+        }
+
+        final data = snap.data() as Map<String, dynamic>?;
+        int fisico = data?['stock_fisico'] ?? 0;
+        int comprometido = data?['stock_comprometido'] ?? 0;
+        int disponible = fisico - comprometido;
+
+        if (!data!.containsKey('stock_comprometido')) {
+          debugPrint(
+            "ADVERTENCIA: 'stock_comprometido' no existe en ${entry.key}.",
+          );
+        }
+
+        if (disponible < entry.value) {
+          faltaStock = true;
+          debugPrint(
+            "DEBUG: Insuficiente stock para ${entry.key}. Disponible: $disponible",
+          );
+        }
       }
-    }
 
-    // 2. Crear el pedido
-    DocumentReference nuevoPedido = _db.collection('Pedidos').doc();
-    batch.set(nuevoPedido, {
-      'tipo_hielo': {
-        'categoria': categoriaHielo,
-        'cantidad_saco': productosYCantidades["NZAtCFwTfLTwb3xiiOUk"] ?? 0,
-        'cantidad_bolsa': productosYCantidades["DWDbVnRf5nqGu8uTu3KA"] ?? 0,
-      },
-      'Monto_total': monto,
-      'N_ticket': ticket,
-      'estado': 'Pendiente',
-      'fecha': FieldValue.serverTimestamp(),
-      'creado_por': nombreCreador,
-      'sin_stock': faltaStock,
-      'id_cliente': idCliente,
-    });
-
-    // 3. Aumentar stock comprometido (PCA Logic)
-    for (var entry in productosYCantidades.entries) {
-      DocumentReference productoRef = _db
-          .collection('Productos')
-          .doc(entry.key);
-      batch.update(productoRef, {
-        'stock_comprometido': FieldValue.increment(entry.value),
+      // 2. Crear el pedido
+      DocumentReference nuevoPedido = _db.collection('Pedidos').doc();
+      batch.set(nuevoPedido, {
+        'tipo_hielo': {
+          'categoria': categoriaHielo,
+          'cantidad_saco': productosYCantidades["NZAtCFwTfLTwb3xiiOUk"] ?? 0,
+          'cantidad_bolsa': productosYCantidades["DWDbVnRf5nqGu8uTu3KA"] ?? 0,
+        },
+        'Monto_total': monto,
+        'N_ticket': ticket,
+        'estado': 'Pendiente',
+        'fecha': FieldValue.serverTimestamp(),
+        'creado_por': nombreCreador,
+        'sin_stock': faltaStock,
+        'id_cliente': idCliente,
+        'ultima_modificacion': FieldValue.serverTimestamp(),
       });
+
+      // 3. Aumentar stock comprometido (PCA Logic)
+      for (var entry in productosYCantidades.entries) {
+        debugPrint(
+          "DEBUG: Incrementando stock_comprometido de ${entry.key} en +${entry.value}",
+        );
+        DocumentReference productoRef = _db
+            .collection('Productos')
+            .doc(entry.key);
+
+        // Verificación de existencia del campo antes de incrementar
+        final snap = await productoRef.get();
+        if (snap.exists &&
+            !(snap.data() as Map).containsKey('stock_comprometido')) {
+          debugPrint(
+            "ADVERTENCIA: 'stock_comprometido' no existe en ${entry.key}. Inicializando...",
+          );
+          batch.update(productoRef, {'stock_comprometido': 0});
+        }
+
+        batch.update(productoRef, {
+          'stock_comprometido': FieldValue.increment(entry.value),
+        });
+      }
+      await batch.commit();
+
+      // 4. Notificación Automática (Fuera del batch pero reactivo)
+      enviarNotificacionGlobal(
+        "¡Nuevo Pedido Registrado!",
+        "Ticket: $ticket - Monto: $monto Bs. por $nombreCreador",
+      );
+
+      await _registrarEvento(
+        accion: 'PEDIDO_CREADO',
+        detalle:
+            'Ticket: $ticket | Categoría: $categoriaHielo | Monto: $monto Bs.',
+      );
+    } catch (e, stack) {
+      debugPrint("ERROR CRÍTICO en crearPedidoYDescontar: $e");
+      debugPrint("STACKTRACE: $stack");
+      rethrow;
     }
-    await batch.commit();
-
-    // 4. Notificación Automática (Fuera del batch pero reactivo)
-    enviarNotificacionGlobal(
-      "¡Nuevo Pedido Registrado!",
-      "Ticket: $ticket - Monto: $monto Bs. por $nombreCreador",
-    );
-
-    await _registrarEvento(
-      accion: 'PEDIDO_CREADO',
-      detalle:
-          'Ticket: $ticket | Categoría: $categoriaHielo | Monto: $monto Bs.',
-    );
   }
 
   Stream<List<Cita>> streamCitas(DateTime fecha) {
@@ -405,6 +654,8 @@ class DatabaseService {
         .collection('Citas')
         .where('fecha', isGreaterThanOrEqualTo: inicio)
         .where('fecha', isLessThan: fin)
+        .orderBy('fecha')
+        .orderBy('slot')
         .snapshots()
         .map(
           (snap) => snap.docs.map((doc) => Cita.fromFirestore(doc)).toList(),
@@ -416,13 +667,102 @@ class DatabaseService {
     required String motivo,
     required DateTime fecha,
     required String slot,
+    String? idPedido,
+    String? idCliente,
+    String? nombreCliente,
+    String colorEtiqueta = "#FFA500",
+    bool estadoAgendado = false,
   }) async {
     await _db.collection('Citas').add({
       'nombre': nombre,
       'motivo': motivo,
       'fecha': Timestamp.fromDate(fecha),
       'slot': slot,
+      'id_pedido': idPedido,
+      'id_cliente': idCliente,
+      'nombre_cliente': nombreCliente,
+      'color_etiqueta': colorEtiqueta,
+      'estado_agendado': estadoAgendado,
       'creado_en': FieldValue.serverTimestamp(),
+      'ultima_modificacion': FieldValue.serverTimestamp(),
     });
+  }
+
+  Future<void> actualizarEstadoAgendado(String idCita, bool completado) async {
+    await _db.collection('Citas').doc(idCita).update({
+      'estado_agendado': completado,
+      'color_etiqueta': completado ? "#4CAF50" : "#FFA500", // Verde vs Naranja
+      'ultima_modificacion': FieldValue.serverTimestamp(),
+    });
+  }
+
+  // --- FUNCIÓN DE AUDITORÍA ---
+  Future<Map<String, int>> verificarStockReal(String productoId) async {
+    try {
+      final doc = await _db.collection('Productos').doc(productoId).get();
+      if (!doc.exists) return {'fisico': 0, 'comprometido': 0};
+
+      final data = doc.data() as Map<String, dynamic>;
+      return {
+        'fisico': (data['stock_fisico'] as num? ?? 0).toInt(),
+        'comprometido': (data['stock_comprometido'] as num? ?? 0).toInt(),
+      };
+    } catch (e) {
+      debugPrint("Error en auditoría verificarStockReal: $e");
+      return {'fisico': 0, 'comprometido': 0};
+    }
+  }
+
+  Future<void> actualizarPedido({
+    required String id,
+    required String categoriaHielo,
+    required double monto,
+    required String ticket,
+    required Map<String, int> productosYCantidades,
+    required String nombreCreador,
+    required Map<String, int> cantPrevia, // Para ajustar stockComprometido
+    String? idCliente,
+  }) async {
+    try {
+      WriteBatch batch = _db.batch();
+
+      // 1. Ajustar stock comprometido (Revertir previo, aplicar nuevo)
+      for (var entry in productosYCantidades.entries) {
+        final idProd = entry.key;
+        final nuevaCant = entry.value;
+        final viejaCant = cantPrevia[idProd] ?? 0;
+        final delta = nuevaCant - viejaCant;
+
+        if (delta != 0) {
+          batch.update(_db.collection('Productos').doc(idProd), {
+            'stock_comprometido': FieldValue.increment(delta),
+          });
+        }
+      }
+
+      // 2. Actualizar el pedido
+      batch.update(_db.collection('Pedidos').doc(id), {
+        'tipo_hielo.categoria': categoriaHielo,
+        'tipo_hielo.cantidad_saco':
+            productosYCantidades["NZAtCFwTfLTwb3xiiOUk"] ?? 0,
+        'tipo_hielo.cantidad_bolsa':
+            productosYCantidades["DWDbVnRf5nqGu8uTu3KA"] ?? 0,
+        'Monto_total': monto,
+        'N_ticket': ticket,
+        'creado_por': nombreCreador,
+        'id_cliente': idCliente,
+        'ultima_modificacion': FieldValue.serverTimestamp(),
+      });
+
+      await batch.commit();
+
+      await _registrarEvento(
+        accion: 'PEDIDO_ACTUALIZADO',
+        detalle: 'Ticket: $ticket | ID: $id actualizado por $nombreCreador',
+      );
+    } catch (e) {
+      debugPrint("Error al actualizar pedido: $e");
+      rethrow;
+    }
   }
 }

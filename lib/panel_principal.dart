@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'theme.dart';
 import 'servicios_de_base_de_datos.dart'; // Aquí está tu DatabaseService original
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -10,7 +11,12 @@ import 'dart:async';
 
 class PanelPrincipal extends StatefulWidget {
   final VoidCallback onToggleTheme;
-  const PanelPrincipal({super.key, required this.onToggleTheme});
+  final bool esInvitado;
+  const PanelPrincipal({
+    super.key,
+    required this.onToggleTheme,
+    this.esInvitado = false,
+  });
 
   @override
   State<PanelPrincipal> createState() => _PanelPrincipalState();
@@ -19,209 +25,406 @@ class PanelPrincipal extends StatefulWidget {
 class _PanelPrincipalState extends State<PanelPrincipal> {
   final DatabaseService _dbService = DatabaseService();
   String _filtroTicket = "";
-  String _rolActual = "Empleado";
   String _filtroEstado = "Todos";
   DateTime _selectedDate = DateTime.now();
 
   late Stream<QuerySnapshot> _productosStream;
+  late Future<DocumentSnapshot?> _userFuture;
+
+  // Método de obtención de datos basado exclusivamente en el correo
+  Future<DocumentSnapshot?> _obtenerPerfilPorEmail(String email) async {
+    try {
+      // Consulta obligatoria por campo 'correo' ya que los IDs son aleatorios
+      final query = await FirebaseFirestore.instance
+          .collection('Trabajadores')
+          .where('correo', isEqualTo: email)
+          .limit(1)
+          .get();
+
+      if (query.docs.isNotEmpty) return query.docs.first;
+      return null;
+    } catch (e) {
+      debugPrint("Error crítico en _obtenerPerfilPorEmail: $e");
+      return null;
+    }
+  }
 
   @override
   void initState() {
     super.initState();
-    _cargarDatosUsuario();
+    final userAuth = FirebaseAuth.instance.currentUser;
+    // Iniciamos la carga basada en email como llave única
+    if (userAuth != null && userAuth.email != null) {
+      _userFuture = _obtenerPerfilPorEmail(userAuth.email!);
+    } else {
+      _userFuture = Future.value(null);
+    }
+
     _productosStream = FirebaseFirestore.instance
         .collection('Productos')
         .snapshots();
   }
 
-  String _nombreCompleto = "Usuario"; // Añade esta variable
-
-  Future<void> _cargarDatosUsuario() async {
-    final userAuth = FirebaseAuth.instance.currentUser;
-    if (userAuth != null) {
-      if (!mounted) return;
-      try {
-        debugPrint("DEBUG: Buscando trabajador con UID: ${userAuth.uid}");
-
-        final doc = await FirebaseFirestore.instance
-            .collection('Trabajadores')
-            .doc(userAuth.uid)
-            .get();
-
-        if (!mounted) return;
-
-        if (doc.exists) {
-          final data = doc.data() as Map<String, dynamic>;
-          setState(() {
-            _nombreCompleto =
-                "${data['nombre'] ?? 'Sin Nombre'} ${data['apellido'] ?? ''}";
-            _rolActual = data['rol'] ?? "Empleado";
-          });
-          debugPrint("DEBUG: Éxito! Datos encontrados: $_nombreCompleto");
-        } else {
-          debugPrint(
-            "DEBUG: ERROR - El documento NO existe en la colección Trabajadores.",
-          );
-          setState(() => _nombreCompleto = "Error: Doc no encontrado");
-        }
-      } catch (e) {
-        debugPrint("DEBUG: ERROR EXCEPCIÓN - $e");
-        if (!mounted) return;
-        setState(() => _nombreCompleto = "Error: $e");
-      }
-    }
-  }
+  // Ya no usamos variables de estado para el nombre y el rol,
+  // sino que los obtenemos directamente del StreamBuilder en el build.
 
   @override
   Widget build(BuildContext context) {
-    return DefaultTabController(
-      length: 4,
-      child: Scaffold(
-        body: SafeArea(
+    return FutureBuilder<DocumentSnapshot?>(
+      future: _userFuture,
+      builder: (context, userSnap) {
+        if (widget.esInvitado) {
+          final Map<String, dynamic> guestData = {
+            'nombre': 'Invitado',
+            'apellido': '',
+            'rol': 'Invitado',
+            'usuario': 'invitado',
+            'correo': 'public@frifalca.com',
+          };
+          return _buildAdaptiveLayout("Invitado", "Invitado", guestData);
+        }
+
+        if (userSnap.connectionState == ConnectionState.waiting) {
+          return const Scaffold(
+            body: Center(child: CircularProgressIndicator()),
+          );
+        }
+
+        if (userSnap.hasError || !userSnap.hasData || userSnap.data == null) {
+          return const Scaffold(
+            body: Center(
+              child: Padding(
+                padding: EdgeInsets.all(30.0),
+                child: Text(
+                  "El correo no tiene un perfil asociado en la base de datos.",
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                ),
+              ),
+            ),
+          );
+        }
+
+        final userData = userSnap.data!.data() as Map<String, dynamic>;
+        final String nombreCompleto =
+            "${userData['nombre'] ?? 'Sin nombre'} ${userData['apellido'] ?? ''}"
+                .trim();
+        final String rolActual = userData['rol'] ?? "Empleado";
+
+        return _buildAdaptiveLayout(nombreCompleto, rolActual, userData);
+      },
+    );
+  }
+
+  Widget _buildAdaptiveLayout(
+    String nombreCompleto,
+    String rolActual,
+    Map<String, dynamic> userData,
+  ) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final bool isDesktop = constraints.maxWidth >= 800;
+        return DefaultTabController(
+          length: widget.esInvitado ? 1 : 4,
           child: StreamBuilder<QuerySnapshot>(
             stream: _productosStream,
             builder: (context, prodSnap) {
-              int sacoFisico = 0, sacoComp = 0;
-              int bolsaFisico = 0, bolsaComp = 0;
-
+              // --- Cálculo de Stocks ---
+              int sacoFisico = 0, sacoComp = 0, bolsaFisico = 0, bolsaComp = 0;
               if (prodSnap.hasData) {
                 for (var doc in prodSnap.data!.docs) {
                   final data = doc.data() as Map<String, dynamic>;
                   if (doc.id == "NZAtCFwTfLTwb3xiiOUk") {
-                    sacoFisico = data['stock_fisico'] ?? 0;
-                    sacoComp = data['stock_comprometido'] ?? 0;
+                    sacoFisico = (data['stock_fisico'] as num? ?? 0).toInt();
+                    sacoComp = (data['stock_comprometido'] as num? ?? 0)
+                        .toInt();
                   }
                   if (doc.id == "DWDbVnRf5nqGu8uTu3KA") {
-                    bolsaFisico = data['stock_fisico'] ?? 0;
-                    bolsaComp = data['stock_comprometido'] ?? 0;
+                    bolsaFisico = (data['stock_fisico'] as num? ?? 0).toInt();
+                    bolsaComp = (data['stock_comprometido'] as num? ?? 0)
+                        .toInt();
                   }
                 }
               }
 
-              int sacoDisp = sacoFisico - sacoComp;
-              int bolsaDisp = bolsaFisico - bolsaComp;
-              bool hayAlerta = (sacoDisp <= 0 && bolsaDisp <= 0);
-              double headerHeight = hayAlerta ? 310 : 250;
+              // --- AUDITORÍA DE STOCK ---
+              if (prodSnap.hasData) {
+                debugPrint("--- AUDITORÍA DE INVENTARIO (PanelPrincipal) ---");
+                debugPrint(
+                  "DEBUG: Estado del Stream Productos: ${prodSnap.connectionState}",
+                );
+                debugPrint(
+                  "DEBUG: Cantidad de documentos recibidos: ${prodSnap.data?.docs.length ?? 0}",
+                );
 
-              return NestedScrollView(
-                headerSliverBuilder: (context, innerBoxIsScrolled) {
-                  return [
-                    // --- LOGO Y LOGOUT (Scrollable) ---
-                    SliverToBoxAdapter(
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 20,
-                          vertical: 15,
-                        ),
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            Image.asset(
-                              'assets/frifalca6.png',
-                              height: 40,
-                              fit: BoxFit.contain,
-                            ),
-                            Text(
-                              "Frifalca C.A.",
-                              style: TextStyle(
-                                fontSize: 28,
-                                fontWeight: FontWeight.bold,
-                                color: Colors.cyan[600],
-                                letterSpacing: -0.5,
-                              ),
-                            ),
-                            Row(
-                              children: [
-                                _buildHeaderButton(
-                                  icon:
-                                      Theme.of(context).brightness ==
-                                          Brightness.dark
-                                      ? Icons.light_mode
-                                      : Icons.dark_mode,
-                                  color:
-                                      Theme.of(context).brightness ==
-                                          Brightness.dark
-                                      ? Colors.yellow
-                                      : const Color(0xFF2C3E50),
-                                  onPressed: widget.onToggleTheme,
-                                ),
-                                _buildHeaderButton(
-                                  icon: Icons.logout_rounded,
-                                  color: const Color(0xFFE74C3C),
-                                  onPressed: () =>
-                                      _mostrarConfirmacionLogout(context),
-                                ),
-                              ],
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
+                if (prodSnap.data!.docs.isNotEmpty) {
+                  debugPrint(
+                    "DEBUG: Ejemplo de primer doc (Productos): ${prodSnap.data?.docs.first.data()}",
+                  );
+                  for (var doc in prodSnap.data!.docs) {
+                    final data = doc.data() as Map<String, dynamic>;
+                    final String nombreProd = doc.id == "NZAtCFwTfLTwb3xiiOUk"
+                        ? "SACO"
+                        : "BOLSA";
+                    final int fisico = (data['stock_fisico'] as num? ?? 0)
+                        .toInt();
+                    final int compField =
+                        (data['stock_comprometido'] as num? ?? 0).toInt();
+                    debugPrint(
+                      "Producto: $nombreProd | Físico Firebase: $fisico | Comprometido Firebase: $compField | Disponible Calc: ${fisico - compField}",
+                    );
+                  }
+                } else {
+                  debugPrint(
+                    "DEBUG: No se encontraron documentos en la colección 'Productos'",
+                  );
+                }
+                debugPrint("-----------------------------------------------");
+              } else if (prodSnap.hasError) {
+                debugPrint(
+                  "DEBUG: Error en Stream Productos: ${prodSnap.error}",
+                );
+              } else {
+                debugPrint(
+                  "DEBUG: Esperando datos de Productos (Estado: ${prodSnap.connectionState})",
+                );
+              }
 
-                    // --- BIENVENIDA (Scrollable) ---
-                    SliverToBoxAdapter(
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 20),
-                        child: _buildGreetingCard(),
-                      ),
-                    ),
-
-                    const SliverToBoxAdapter(child: SizedBox(height: 15)),
-
-                    // --- CONTROL DE INVENTARIO (Sticky/Pinned) ---
-                    SliverPersistentHeader(
-                      pinned: true,
-                      delegate: _SliverAppBarDelegate(
-                        minHeight: headerHeight,
-                        maxHeight: headerHeight,
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 20),
-                          color: Theme.of(context).scaffoldBackgroundColor,
-                          child: Column(
-                            children: [
-                              if (hayAlerta) _buildAlertaProduccion(),
-                              comp.InventarioResumenCard(
-                                totalSacos: sacoDisp,
-                                totalBolsas: bolsaDisp,
-                                onAjustar: (id, cantidad) => _dbService
-                                    .ajustarStock(id, cantidad, _rolActual),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-                  ];
-                },
-                body: TabBarView(
-                  children: [
-                    _buildInventarioTabContent(sacoDisp, bolsaDisp),
-                    _buildPedidosTab(),
-                    _buildCitasTab(),
-                    _buildConfiguracionesTab(),
-                  ],
-                ),
-              );
+              if (isDesktop) {
+                return _EscritorioView(
+                  nombreCompleto: nombreCompleto,
+                  rolActual: rolActual,
+                  userData: userData,
+                  sacoFisico: sacoFisico,
+                  sacoComp: sacoComp,
+                  bolsaFisico: bolsaFisico,
+                  bolsaComp: bolsaComp,
+                  esInvitado: widget.esInvitado,
+                  onToggleTheme: widget.onToggleTheme,
+                  parent: this,
+                );
+              } else {
+                return _MovilView(
+                  nombreCompleto: nombreCompleto,
+                  rolActual: rolActual,
+                  userData: userData,
+                  sacoFisico: sacoFisico,
+                  sacoComp: sacoComp,
+                  bolsaFisico: bolsaFisico,
+                  bolsaComp: bolsaComp,
+                  esInvitado: widget.esInvitado,
+                  onToggleTheme: widget.onToggleTheme,
+                  parent: this,
+                );
+              }
             },
           ),
-        ),
-        floatingActionButton: Padding(
-          padding: const EdgeInsets.only(bottom: 10),
-          child: SizedBox(
-            height: 60,
-            width: 60,
-            child: FloatingActionButton(
-              onPressed: () => _mostrarDialogoNuevoPedido(context),
-              backgroundColor: Colors.cyan,
-              elevation: 4,
-              shape: const CircleBorder(),
-              child: const Icon(Icons.add, color: Colors.white, size: 30),
+        );
+      },
+    );
+  }
+
+  // --- WIDGETS DE NIVEL DE VISTA ---
+
+  Widget _buildMainContent({
+    required String nombreCompleto,
+    required String rolActual,
+    required int sacoFisico,
+    required int sacoComp,
+    required int bolsaFisico,
+    required int bolsaComp,
+    required Map<String, dynamic> userData,
+    bool showHeader = true,
+  }) {
+    final int sacoDisp = (sacoFisico - sacoComp).clamp(0, 999999);
+    final int bolsaDisp = (bolsaFisico - bolsaComp).clamp(0, 999999);
+    bool hayAlertaProd = (sacoDisp <= 0 && bolsaDisp <= 0);
+    bool hayAlertaStock = (sacoDisp <= 0 || bolsaDisp <= 0);
+    double totalHeight =
+        (hayAlertaStock ? 320 : 260) + (hayAlertaProd ? 80 : 0);
+
+    return Scrollbar(
+      thumbVisibility: true,
+      trackVisibility: true,
+      child: NestedScrollView(
+        headerSliverBuilder: (context, innerBoxIsScrolled) {
+          return [
+            if (showHeader) ...[
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 25, 20, 15),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Image.asset('assets/frifalca6.png', height: 40),
+                      Text(
+                        "Frifalca C.A.",
+                        style: Theme.of(context).textTheme.headlineMedium
+                            ?.copyWith(
+                              color: AppColors.secondary,
+                              fontWeight: FontWeight.bold,
+                            ),
+                      ),
+                      Row(
+                        children: [
+                          _buildHeaderButton(
+                            icon:
+                                Theme.of(context).brightness == Brightness.dark
+                                ? Icons.light_mode
+                                : Icons.dark_mode,
+                            color:
+                                Theme.of(context).brightness == Brightness.dark
+                                ? Colors.yellow
+                                : AppColors.primary,
+                            onPressed: widget.onToggleTheme,
+                          ),
+                          _buildHeaderButton(
+                            icon: Icons.logout_rounded,
+                            color: AppColors.error,
+                            onPressed: () =>
+                                _mostrarConfirmacionLogout(context),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 20),
+                  child: _buildGreetingCard(nombreCompleto),
+                ),
+              ),
+              const SliverToBoxAdapter(child: SizedBox(height: 25)),
+            ],
+            SliverPersistentHeader(
+              pinned: true,
+              delegate: _SliverAppBarDelegate(
+                minHeight: totalHeight,
+                maxHeight: totalHeight,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 20),
+                  color: Theme.of(context).scaffoldBackgroundColor,
+                  child: Column(
+                    children: [
+                      if (hayAlertaProd) _buildAlertaProduccion(),
+                      comp.InventarioResumenCard(
+                        sacoFisico: sacoFisico,
+                        sacoComp: sacoComp,
+                        bolsaFisico: bolsaFisico,
+                        bolsaComp: bolsaComp,
+                        readOnly: widget.esInvitado,
+                        onAjustar: (id, cantidad) => _procesarAjusteInventario(
+                          id,
+                          cantidad,
+                          nombreCompleto,
+                        ),
+                      ),
+                      const SizedBox(height: 20),
+                    ],
+                  ),
+                ),
+              ),
             ),
-          ),
+          ];
+        },
+        body: TabBarView(
+          physics: widget.esInvitado
+              ? const NeverScrollableScrollPhysics()
+              : null,
+          children: [
+            _buildInventarioTabContent(
+              sacoDisp,
+              bolsaDisp,
+              nombreCompleto,
+              rolActual,
+            ),
+            if (!widget.esInvitado) ...[
+              _buildPedidosTab(rolActual, nombreCompleto),
+              _buildCitasTab(),
+              _buildConfiguracionesTab(rolActual, userData),
+            ],
+          ],
         ),
-        floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
-        bottomNavigationBar: _buildBottomNav(),
       ),
+    );
+  }
+
+  Future<void> _procesarAjusteInventario(
+    String id,
+    int cantidad,
+    String autor,
+  ) async {
+    try {
+      await _dbService.ajustarStock(id, cantidad, autor);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text("Inventario actualizado por $autor"),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("Error: $e"), backgroundColor: Colors.red),
+        );
+      }
+    }
+  }
+
+  Widget _buildNavigationRail(BuildContext railContext, String nombreCompleto) {
+    final controller = DefaultTabController.of(railContext);
+    return NavigationRail(
+      selectedIndex: controller.index,
+      onDestinationSelected: (int index) {
+        setState(() {
+          controller.animateTo(index);
+        });
+      },
+      leading: Column(
+        children: [
+          const SizedBox(height: 20),
+          Image.asset('assets/frifalca6.png', height: 40),
+          const SizedBox(height: 30),
+          FloatingActionButton(
+            mini: true,
+            elevation: 0,
+            backgroundColor: AppColors.secondary,
+            onPressed: () =>
+                _mostrarDialogoNuevoPedido(context, nombreCompleto),
+            child: const Icon(Icons.add, color: Colors.white),
+          ),
+          const SizedBox(height: 10),
+        ],
+      ),
+      backgroundColor: AppColors.primary,
+      indicatorColor: AppColors.secondary.withValues(alpha: 0.2),
+      selectedIconTheme: const IconThemeData(color: AppColors.secondary),
+      unselectedIconTheme: const IconThemeData(color: Colors.white54),
+      selectedLabelTextStyle: const TextStyle(color: AppColors.secondary),
+      unselectedLabelTextStyle: const TextStyle(color: Colors.white54),
+      labelType: NavigationRailLabelType.all,
+      destinations: const [
+        NavigationRailDestination(
+          icon: Icon(Icons.grid_view_rounded),
+          label: Text("Panel"),
+        ),
+        NavigationRailDestination(
+          icon: Icon(Icons.receipt_long_rounded),
+          label: Text("Pedidos"),
+        ),
+        NavigationRailDestination(
+          icon: Icon(Icons.calendar_month_rounded),
+          label: Text("Citas"),
+        ),
+        NavigationRailDestination(
+          icon: Icon(Icons.settings_suggest_rounded),
+          label: Text("Config"),
+        ),
+      ],
     );
   }
 
@@ -249,10 +452,121 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
     );
   }
 
-  Widget _buildGreetingCard() {
+  Widget _buildDrawer(
+    BuildContext context,
+    String nombreCompleto,
+    String rolActual,
+  ) {
+    return Drawer(
+      backgroundColor: AppColors.primary,
+      child: Column(
+        children: [
+          DrawerHeader(
+            decoration: const BoxDecoration(color: AppColors.primary),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Image.asset('assets/frifalca6.png', height: 60),
+                const SizedBox(height: 10),
+                const Text(
+                  "Frifalca C.A.",
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          _buildDrawerItem(
+            context,
+            icon: Icons.grid_view_rounded,
+            label: "Panel Principal",
+            index: 0,
+          ),
+          _buildDrawerItem(
+            context,
+            icon: Icons.receipt_long_rounded,
+            label: "Pedidos",
+            index: 1,
+          ),
+          _buildDrawerItem(
+            context,
+            icon: Icons.calendar_month_rounded,
+            label: "Citas",
+            index: 2,
+          ),
+          _buildDrawerItem(
+            context,
+            icon: Icons.settings_rounded,
+            label: "Configuración",
+            index: 3,
+          ),
+          const Divider(color: Colors.white24, indent: 20, endIndent: 20),
+          ListTile(
+            leading: const Icon(
+              Icons.add_circle_outline,
+              color: AppColors.secondary,
+            ),
+            title: const Text(
+              "Añadir Pedido",
+              style: TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            onTap: () {
+              Navigator.pop(context); // Cierra drawer
+              _mostrarDialogoNuevoPedido(context, nombreCompleto);
+            },
+          ),
+          const Spacer(),
+          ListTile(
+            leading: const Icon(Icons.logout, color: AppColors.error),
+            title: const Text(
+              "Cerrar Sesión",
+              style: TextStyle(color: Colors.white),
+            ),
+            onTap: () => _mostrarConfirmacionLogout(context),
+          ),
+          const SizedBox(height: 20),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDrawerItem(
+    BuildContext context, {
+    required IconData icon,
+    required String label,
+    required int index,
+  }) {
+    final controller = DefaultTabController.of(context);
+    bool selected = controller.index == index;
+    return ListTile(
+      leading: Icon(
+        icon,
+        color: selected ? AppColors.secondary : Colors.white70,
+      ),
+      title: Text(
+        label,
+        style: TextStyle(
+          color: selected ? AppColors.secondary : Colors.white70,
+          fontWeight: selected ? FontWeight.bold : FontWeight.normal,
+        ),
+      ),
+      onTap: () {
+        controller.animateTo(index);
+        Navigator.pop(context);
+      },
+    );
+  }
+
+  Widget _buildGreetingCard(String nombre) {
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(20),
+      // ... resto del widget sin cambios significativos en UI
       decoration: BoxDecoration(
         color: Theme.of(context).cardColor.withValues(alpha: 0.8),
         borderRadius: BorderRadius.circular(40),
@@ -268,15 +582,18 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
         children: [
           Text(
             "Panel Central",
-            style: TextStyle(color: Colors.grey[600], fontSize: 14),
+            style: TextStyle(
+              color: Theme.of(context).brightness == Brightness.dark
+                  ? Colors.grey[400]
+                  : Colors.grey[600],
+              fontSize: 14,
+            ),
           ),
           const SizedBox(height: 5),
           Text(
-            "¡Buen día, ${_nombreCompleto.split(' ')[0]}!",
-            style: const TextStyle(
-              fontSize: 20,
+            "¡Buen día, ${nombre.split(' ')[0]}!",
+            style: Theme.of(context).textTheme.titleLarge?.copyWith(
               fontWeight: FontWeight.bold,
-              color: Color(0xFF2C3E50),
             ),
           ),
         ],
@@ -288,7 +605,7 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-      margin: const EdgeInsets.only(bottom: 10),
+      margin: const EdgeInsets.only(bottom: 20),
       decoration: BoxDecoration(
         color: Colors.red[900],
         borderRadius: BorderRadius.circular(10),
@@ -312,46 +629,82 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
     );
   }
 
-  Widget _buildBottomNav() {
-    return Container(
-      margin: const EdgeInsets.fromLTRB(20, 0, 20, 20),
-      height: 80,
-      decoration: BoxDecoration(
-        color: Theme.of(context).cardColor,
-        borderRadius: BorderRadius.circular(35),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.cyan.withValues(alpha: 0.1),
-            blurRadius: 20,
-            offset: const Offset(0, 5),
+  Widget _buildBottomNav(BuildContext context) {
+    final controller = DefaultTabController.of(context);
+    return ListenableBuilder(
+      listenable: controller,
+      builder: (context, _) {
+        return BottomAppBar(
+          shape: const CircularNotchedRectangle(),
+          notchMargin: 8.0,
+          color: Theme.of(context).cardColor,
+          elevation: 10,
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceAround,
+            children: [
+              _buildMobileNavItem(
+                context,
+                index: 0,
+                icon: Icons.grid_view_rounded,
+                label: "Panel",
+                selected: controller.index == 0,
+              ),
+              _buildMobileNavItem(
+                context,
+                index: 1,
+                icon: Icons.receipt_long_rounded,
+                label: "Pedidos",
+                selected: controller.index == 1,
+              ),
+              const SizedBox(width: 40), // Espacio para el FAB central
+              _buildMobileNavItem(
+                context,
+                index: 2,
+                icon: Icons.calendar_month_rounded,
+                label: "Citas",
+                selected: controller.index == 2,
+              ),
+              _buildMobileNavItem(
+                context,
+                index: 3,
+                icon: Icons.settings_rounded,
+                label: "Config",
+                selected: controller.index == 3,
+              ),
+            ],
           ),
-        ],
-      ),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(35),
-        child: const TabBar(
-          labelColor: Colors.cyan,
-          unselectedLabelColor: Colors.blueGrey,
-          labelStyle: TextStyle(fontSize: 10, fontWeight: FontWeight.bold),
-          unselectedLabelStyle: TextStyle(fontSize: 10),
-          indicator: UnderlineTabIndicator(
-            borderSide: BorderSide(width: 3, color: Colors.cyan),
-            insets: EdgeInsets.symmetric(horizontal: 45),
-          ),
-          indicatorPadding: EdgeInsets.only(bottom: 8),
-          tabs: [
-            Tab(icon: Icon(Icons.grid_view_rounded, size: 22), text: "Panel"),
-            Tab(
-              icon: Icon(Icons.receipt_long_rounded, size: 22),
-              text: "Pedidos",
+        );
+      },
+    );
+  }
+
+  Widget _buildMobileNavItem(
+    BuildContext context, {
+    required int index,
+    required IconData icon,
+    required String label,
+    required bool selected,
+  }) {
+    return Expanded(
+      child: InkWell(
+        onTap: () {
+          DefaultTabController.of(context).animateTo(index);
+        },
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              icon,
+              color: selected ? AppColors.secondary : Colors.blueGrey,
+              size: 24,
             ),
-            Tab(
-              icon: Icon(Icons.calendar_month_rounded, size: 22),
-              text: "Citas",
-            ),
-            Tab(
-              icon: Icon(Icons.settings_rounded, size: 22),
-              text: "Configuraciones",
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 10,
+                color: selected ? AppColors.secondary : Colors.blueGrey,
+                fontWeight: selected ? FontWeight.bold : FontWeight.normal,
+              ),
             ),
           ],
         ),
@@ -359,7 +712,7 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
     );
   }
 
-  Widget _buildPedidosTab() {
+  Widget _buildPedidosTab(String rolActual, String nombreCompleto) {
     return Column(
       children: [
         // --- BARRA DE BÚSQUEDA Y FILTROS ---
@@ -383,7 +736,10 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
               decoration: const InputDecoration(
                 hintText: "Buscar por número de ticket...",
                 hintStyle: TextStyle(color: Colors.grey, fontSize: 14),
-                prefixIcon: Icon(Icons.search_rounded, color: Colors.cyan),
+                prefixIcon: Icon(
+                  Icons.search_rounded,
+                  color: AppColors.secondary,
+                ),
                 border: InputBorder.none,
                 contentPadding: EdgeInsets.symmetric(vertical: 15),
               ),
@@ -411,129 +767,122 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
               filtroTicket: _filtroTicket,
             ),
             builder: (context, snapshot) {
+              debugPrint(
+                "DEBUG: Stream Pedidos - Estado: ${snapshot.connectionState}",
+              );
+              debugPrint(
+                "DEBUG: Stream Pedidos - Cantidad: ${snapshot.data?.length ?? 0}",
+              );
+              debugPrint(
+                "DEBUG: Filtros actuales - Estado: $_filtroEstado, Ticket: $_filtroTicket",
+              );
+
+              if (snapshot.hasError) {
+                debugPrint("DEBUG: Erro en Stream Pedidos: ${snapshot.error}");
+                return Center(child: Text("Error: ${snapshot.error}"));
+              }
+
               if (!snapshot.hasData) {
                 return const Center(child: CircularProgressIndicator());
               }
+
               final pedidos = snapshot.data!;
-              return ListView.builder(
-                itemCount: pedidos.length,
-                itemBuilder: (context, index) {
-                  final pedido = pedidos[index];
-                  final fechaFormateada = pedido.fecha != null
-                      ? "${pedido.fecha!.day}/${pedido.fecha!.month}/${pedido.fecha!.year}"
-                      : "Sin fecha";
-                  return Card(
-                    elevation: 1,
-                    margin: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 6,
-                    ),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: InkWell(
+              if (pedidos.isEmpty) {
+                return const Center(
+                  child: Text(
+                    "No se encontraron pedidos con estos filtros.",
+                    style: TextStyle(color: Colors.grey),
+                  ),
+                );
+              }
+
+              return Scrollbar(
+                thumbVisibility: true,
+                controller: ScrollController(),
+                child: ListView.builder(
+                  padding: const EdgeInsets.all(15),
+                  itemCount: pedidos.length,
+                  shrinkWrap: true,
+                  physics:
+                      const ClampingScrollPhysics(), // Cambiado para mejor integración
+                  itemBuilder: (context, index) {
+                    final pedido = pedidos[index];
+                    return comp.PedidoCard(
+                      pedido: pedido,
                       onTap: () => _mostrarDetalleCompleto(
                         context,
                         pedido,
-                      ), // Abre el modal inferior
-                      borderRadius: BorderRadius.circular(12),
-                      child: Padding(
-                        padding: const EdgeInsets.all(12.0),
-                        child: Column(
-                          children: [
-                            Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                              children: [
-                                Text(
-                                  "Ticket: ${pedido.ticket}",
-                                  style: const TextStyle(
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 16,
-                                  ),
-                                ),
-                                _buildBadgeEstado(
-                                  pedido.estado,
-                                  pedido.sinStock,
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 8),
-                            Row(
-                              children: [
-                                Expanded(
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      Text(
-                                        "Tipo: ${pedido.tipoHielo}",
-                                        style: TextStyle(
-                                          color: Colors.grey[700],
-                                        ),
-                                      ),
-                                      Text(
-                                        "Fecha: $fechaFormateada",
-                                        style: TextStyle(
-                                          color: Colors.grey[700],
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                                if (pedido.estado == 'Pendiente')
-                                  Row(
-                                    children: [
-                                      if (_rolActual == "admin")
-                                        IconButton(
-                                          icon: const Icon(
-                                            Icons.cancel_outlined,
-                                            color: Colors.red,
-                                          ),
-                                          onPressed: () =>
-                                              _dbService.cancelarPedido(
-                                                pedido.id,
-                                                cantSaco: pedido.cantSaco,
-                                                cantBolsa: pedido.cantBolsa,
-                                              ),
-                                        ),
-                                      const SizedBox(width: 4),
-                                      ElevatedButton(
-                                        style: ElevatedButton.styleFrom(
-                                          backgroundColor: Colors.green[50],
-                                          foregroundColor: Colors.green,
-                                        ),
-                                        onPressed: () async {
-                                          await _dbService.despacharPedido(
-                                            pedido.id,
-                                            _nombreCompleto,
-                                            cantSaco: pedido.cantSaco,
-                                            cantBolsa: pedido.cantBolsa,
-                                          );
-                                          if (context.mounted) {
-                                            ScaffoldMessenger.of(
-                                              context,
-                                            ).showSnackBar(
-                                              const SnackBar(
-                                                content: Text(
-                                                  "Se ha despachado correctamente",
-                                                ),
-                                                backgroundColor: Colors.green,
-                                              ),
-                                            );
-                                          }
-                                        },
-                                        child: const Text("Despachar"),
-                                      ),
-                                    ],
-                                  ),
-                              ],
-                            ),
-                          ],
-                        ),
+                        rolActual,
+                        nombreCompleto,
                       ),
-                    ),
-                  );
-                },
+                      trailingActions: pedido.estado == 'Pendiente'
+                          ? Row(
+                              children: [
+                                if (rolActual == "admin")
+                                  IconButton(
+                                    icon: const Icon(
+                                      Icons.cancel_outlined,
+                                      color: Colors.red,
+                                    ),
+                                    onPressed: () => _confirmarAccion(
+                                      context: context,
+                                      titulo: "Cancelar Pedido",
+                                      mensaje:
+                                          "¿Seguro que quieres cancelar el ticket ${pedido.ticket}?",
+                                      colorBoton: Colors.red,
+                                      textoBoton: "Sí, cancelar",
+                                      onConfirm: () async {
+                                        await _dbService.cancelarPedido(
+                                          pedido.id,
+                                          cantSaco: pedido.cantSaco,
+                                          cantBolsa: pedido.cantBolsa,
+                                        );
+                                        _notificarExito(
+                                          "Pedido #${pedido.ticket} cancelado",
+                                        );
+                                      },
+                                    ),
+                                  ),
+                                const SizedBox(width: 4),
+                                ElevatedButton(
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: Colors.green[50],
+                                    foregroundColor: Colors.green,
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 12,
+                                    ),
+                                    minimumSize: const Size(0, 32),
+                                  ),
+                                  onPressed: () => _confirmarAccion(
+                                    context: context,
+                                    titulo: "Despachar Pedido",
+                                    mensaje:
+                                        "¿Confirmas el despacho del ticket ${pedido.ticket}?",
+                                    colorBoton: Colors.green,
+                                    textoBoton: "Confirmar Despacho",
+                                    onConfirm: () async {
+                                      await _dbService.despacharPedido(
+                                        pedido.id,
+                                        nombreCompleto,
+                                        cantSaco: pedido.cantSaco,
+                                        cantBolsa: pedido.cantBolsa,
+                                      );
+                                      _notificarExito(
+                                        "Pedido #${pedido.ticket} despachado con éxito",
+                                      );
+                                    },
+                                  ),
+                                  child: const Text(
+                                    "Despachar",
+                                    style: TextStyle(fontSize: 12),
+                                  ),
+                                ),
+                              ],
+                            )
+                          : null,
+                    );
+                  },
+                ),
               );
             },
           ),
@@ -543,7 +892,12 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
   }
 
   // Dentro de _PanelPrincipalState en panel_principal.dart
-  Widget _buildInventarioTabContent(int sacoDisp, int bolsaDisp) {
+  Widget _buildInventarioTabContent(
+    int sacoDisp,
+    int bolsaDisp,
+    String nombreCompleto,
+    String rolActual,
+  ) {
     return StreamBuilder<List<Pedido>>(
       stream: _dbService.streamPedidos(filtroEstado: "Pendiente"),
       builder: (context, pedidoSnap) {
@@ -554,16 +908,47 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
           return const Center(child: CircularProgressIndicator());
         }
 
-        return ListView(
-          padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
-          children: [
-            const Divider(),
-            comp.ListaPedidosPendientes(
-              pedidos: pedidoSnap.data ?? [],
-              stockSacoDisp: sacoDisp,
-              stockBolsaDisp: bolsaDisp,
-            ),
-          ],
+        final bool isDesktop = MediaQuery.of(context).size.width > 800;
+        return Scrollbar(
+          thumbVisibility: true,
+          controller:
+              ScrollController(), // Evita conflictos con el Scrollbar principal
+          child: ListView(
+            padding: EdgeInsets.fromLTRB(20, isDesktop ? 10 : 20, 20, 20),
+            children: [
+              if (!isDesktop) const Divider(),
+              comp.ListaPedidosPendientes(
+                pedidos: pedidoSnap.data ?? [],
+                stockSacoDisp: sacoDisp,
+                stockBolsaDisp: bolsaDisp,
+                onDespachar: (pedido) {
+                  _confirmarAccion(
+                    context: context,
+                    titulo: "Despachar Ahora",
+                    mensaje:
+                        "¿Confirmas el despacho rápido del ticket ${pedido.ticket}?",
+                    colorBoton: Colors.green,
+                    textoBoton: "Sí, despachar",
+                    onConfirm: () async {
+                      await _dbService.despacharPedido(
+                        pedido.id,
+                        nombreCompleto,
+                        cantSaco: pedido.cantSaco,
+                        cantBolsa: pedido.cantBolsa,
+                      );
+                      _notificarExito("Pedido #${pedido.ticket} despachado!");
+                    },
+                  );
+                },
+                onShowDetails: (pedido) => _mostrarDetalleCompleto(
+                  context,
+                  pedido,
+                  rolActual,
+                  nombreCompleto,
+                ),
+              ),
+            ],
+          ),
         );
       },
     );
@@ -603,30 +988,33 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
             stream: _dbService.streamCitas(_selectedDate),
             builder: (context, snapshot) {
               final citas = snapshot.data ?? [];
-              return ListView.builder(
-                padding: const EdgeInsets.symmetric(horizontal: 15),
-                itemCount: 48, // De 08:00 a 16:00 son 8 horas * 6 slots = 48
-                itemBuilder: (context, index) {
-                  // Generar slots de 10 min desde 08:00
-                  final totalMinutes = 8 * 60 + (index * 10);
-                  final hour = totalMinutes ~/ 60;
-                  final min = totalMinutes % 60;
-                  final slotTime =
-                      "${hour.toString().padLeft(2, '0')}:${min.toString().padLeft(2, '0')}";
+              return Scrollbar(
+                thumbVisibility: true,
+                child: ListView.builder(
+                  padding: const EdgeInsets.symmetric(horizontal: 15),
+                  itemCount: 48, // De 08:00 a 16:00 son 8 horas * 6 slots = 48
+                  itemBuilder: (context, index) {
+                    // Generar slots de 10 min desde 08:00
+                    final totalMinutes = 8 * 60 + (index * 10);
+                    final hour = totalMinutes ~/ 60;
+                    final min = totalMinutes % 60;
+                    final slotTime =
+                        "${hour.toString().padLeft(2, '0')}:${min.toString().padLeft(2, '0')}";
 
-                  final citaEnSlot = citas.firstWhere(
-                    (c) => c.slot == slotTime,
-                    orElse: () => Cita(
-                      id: '',
-                      nombre: '',
-                      motivo: '',
-                      fecha: DateTime.now(),
-                      slot: '',
-                    ),
-                  );
+                    final citaEnSlot = citas.firstWhere(
+                      (c) => c.slot == slotTime,
+                      orElse: () => Cita(
+                        id: '',
+                        nombre: '',
+                        motivo: '',
+                        fecha: DateTime.now(),
+                        slot: '',
+                      ),
+                    );
 
-                  return _buildSlotCard(slotTime, citaEnSlot);
-                },
+                    return _buildSlotCard(slotTime, citaEnSlot);
+                  },
+                ),
               );
             },
           ),
@@ -638,22 +1026,52 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
   Widget _buildSlotCard(String slotTime, Cita cita) {
     bool ocupado = cita.id.isNotEmpty;
 
+    // Parseo seguro de color hex
+    Color colorEtiqueta = Colors.green; // Por defecto disponible
+    if (ocupado) {
+      try {
+        colorEtiqueta = Color(
+          int.parse(cita.colorEtiqueta.replaceAll('#', '0xff')),
+        );
+      } catch (e) {
+        colorEtiqueta = Colors.orange;
+      }
+    }
+
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
       child: ListTile(
-        leading: Text(
-          slotTime,
-          style: TextStyle(
-            fontWeight: FontWeight.bold,
-            color: ocupado ? Colors.red : Colors.green,
+        leading: Container(
+          width: 60,
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          decoration: BoxDecoration(
+            color: colorEtiqueta.withValues(alpha: 0.1),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: colorEtiqueta.withValues(alpha: 0.5)),
+          ),
+          child: Text(
+            slotTime,
+            textAlign: TextAlign.center,
+            style: TextStyle(fontWeight: FontWeight.bold, color: colorEtiqueta),
           ),
         ),
-        title: Text(ocupado ? cita.nombre : "Disponible"),
-        subtitle: ocupado ? Text(cita.motivo) : null,
+        title: Text(
+          ocupado ? (cita.nombreCliente ?? cita.nombre) : "Disponible",
+          style: TextStyle(
+            fontWeight: ocupado ? FontWeight.bold : FontWeight.normal,
+          ),
+        ),
+        subtitle: ocupado ? Text(cita.motivo) : const Text("Espacio libre"),
         trailing: IconButton(
-          icon: Icon(ocupado ? Icons.info_outline : Icons.add_circle_outline),
-          color: ocupado ? Colors.cyan : Colors.cyan,
+          icon: Icon(
+            ocupado
+                ? (cita.estadoAgendado
+                      ? Icons.check_circle
+                      : Icons.pending_actions)
+                : Icons.add_circle_outline,
+          ),
+          color: ocupado ? colorEtiqueta : Colors.cyan,
           onPressed: () => _mostrarDialogoCita(slotTime, cita),
         ),
       ),
@@ -662,21 +1080,42 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
 
   void _mostrarDialogoCita(String slot, Cita cita) {
     if (cita.id.isNotEmpty) {
-      // Mostrar info si ya está ocupado
       showDialog(
         context: context,
         builder: (context) => AlertDialog(
-          title: Text("Cita a las $slot"),
+          title: Text("Pedido Agendado - $slot"),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text("Nombre: ${cita.nombre}"),
+              Text(
+                "Cliente: ${cita.nombreCliente ?? cita.nombre}",
+                style: const TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 16,
+                ),
+              ),
+              const SizedBox(height: 10),
+              Text("Nota: ${cita.motivo}"),
               const SizedBox(height: 5),
-              Text("Motivo: ${cita.motivo}"),
+              Text(
+                "Estado: ${cita.estadoAgendado ? 'Completado (Buscado)' : 'Pendiente (Por buscar)'}",
+              ),
             ],
           ),
           actions: [
+            if (!cita.estadoAgendado)
+              ElevatedButton(
+                onPressed: () async {
+                  await _dbService.actualizarEstadoAgendado(cita.id, true);
+                  if (context.mounted) Navigator.pop(context);
+                },
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.green),
+                child: const Text(
+                  "Marcar como Buscado",
+                  style: TextStyle(color: Colors.white),
+                ),
+              ),
             TextButton(
               onPressed: () => Navigator.pop(context),
               child: const Text("Cerrar"),
@@ -687,47 +1126,126 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
       return;
     }
 
-    // Si está libre, permitir crear una
-    final nameCtrl = TextEditingController();
-    final reasonCtrl = TextEditingController();
+    // --- FORMULARIO PARA AGENDAR ---
+    String? idPedidoSel;
+    String? idClienteSel;
+    String? nombreClienteSel;
+    final motivoCtrl = TextEditingController(text: "Retiro de pedido");
 
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        title: Text("Agendar en slot $slot"),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: nameCtrl,
-              decoration: const InputDecoration(labelText: "Nombre"),
+      builder: (context) => StatefulBuilder(
+        builder: (context, setModalState) => AlertDialog(
+          title: Text("Agendar Retiro ($slot)"),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                "Selecciona un pedido pendiente:",
+                style: TextStyle(fontSize: 12, color: Colors.grey),
+              ),
+              const SizedBox(height: 10),
+              StreamBuilder<QuerySnapshot>(
+                stream: FirebaseFirestore.instance
+                    .collection('Pedidos')
+                    .where('estado', isEqualTo: 'Pendiente')
+                    .snapshots(),
+                builder: (context, snapshot) {
+                  if (!snapshot.hasData) return const LinearProgressIndicator();
+                  final pedidos = snapshot.data!.docs;
+                  return DropdownButtonFormField<String>(
+                    isExpanded: true,
+                    initialValue: idPedidoSel,
+                    hint: const Text("Elegir Pedido"),
+                    items: pedidos.map((p) {
+                      final d = p.data() as Map<String, dynamic>;
+                      return DropdownMenuItem(
+                        value: p.id,
+                        child: Text(
+                          "Ticket: ${d['N_ticket']} (${d['tipo_hielo']?['categoria']})",
+                          style: const TextStyle(fontSize: 12),
+                        ),
+                      );
+                    }).toList(),
+                    onChanged: (val) async {
+                      final pDoc = pedidos.firstWhere((p) => p.id == val);
+                      final pData = pDoc.data() as Map<String, dynamic>;
+                      final String? idC = pData['id_cliente'];
+
+                      String nC = "Cliente Genérico";
+                      if (idC != null) {
+                        final cDoc = await FirebaseFirestore.instance
+                            .collection('Clientes')
+                            .doc(idC)
+                            .get();
+                        if (cDoc.exists) {
+                          final cData = cDoc.data()!;
+                          nC = "${cData['Nombre']} ${cData['Apellido']}";
+                        }
+                      }
+
+                      setModalState(() {
+                        idPedidoSel = val;
+                        idClienteSel = idC;
+                        nombreClienteSel = nC;
+                      });
+                    },
+                  );
+                },
+              ),
+              if (nombreClienteSel != null) ...[
+                const SizedBox(height: 15),
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: Colors.green.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.person, color: Colors.green, size: 18),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          "Cliente: $nombreClienteSel",
+                          style: const TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+              const SizedBox(height: 15),
+              TextField(
+                controller: motivoCtrl,
+                decoration: const InputDecoration(labelText: "Nota opcional"),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text("Cancelar"),
             ),
-            TextField(
-              controller: reasonCtrl,
-              decoration: const InputDecoration(labelText: "Motivo"),
+            ElevatedButton(
+              onPressed: idPedidoSel == null
+                  ? null
+                  : () async {
+                      await _dbService.crearCita(
+                        nombre: nombreClienteSel ?? "Cliente",
+                        motivo: motivoCtrl.text,
+                        fecha: _selectedDate,
+                        slot: slot,
+                        idPedido: idPedidoSel,
+                        idCliente: idClienteSel,
+                        nombreCliente: nombreClienteSel,
+                      );
+                      if (context.mounted) Navigator.pop(context);
+                    },
+              child: const Text("Confirmar Agenda"),
             ),
           ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text("Cancelar"),
-          ),
-          ElevatedButton(
-            onPressed: () async {
-              if (nameCtrl.text.isNotEmpty) {
-                await _dbService.crearCita(
-                  nombre: nameCtrl.text,
-                  motivo: reasonCtrl.text,
-                  fecha: _selectedDate,
-                  slot: slot,
-                );
-                if (context.mounted) Navigator.pop(context);
-              }
-            },
-            child: const Text("Guardar"),
-          ),
-        ],
       ),
     );
   }
@@ -760,41 +1278,24 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
     );
   }
 
-  Widget _buildConfiguracionesTab() {
-    return ListView(
-      padding: const EdgeInsets.all(20),
-      children: [
-        const Text(
-          "Configuraciones",
-          style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
-        ),
-        const SizedBox(height: 20),
-        ListTile(
-          leading: const Icon(Icons.person, color: Colors.cyan),
-          title: const Text("Perfil"),
-          subtitle: const Text("Ver tus datos y cambiar contraseña"),
-          tileColor: Theme.of(context).cardColor,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(15),
+  Widget _buildConfiguracionesTab(
+    String rolActual,
+    Map<String, dynamic> userData,
+  ) {
+    return Scrollbar(
+      thumbVisibility: true,
+      child: ListView(
+        padding: const EdgeInsets.all(20),
+        children: [
+          const Text(
+            "Configuraciones",
+            style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
           ),
-          onTap: () {
-            Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (context) => Scaffold(
-                  appBar: AppBar(title: const Text("Perfil")),
-                  body: _buildPerfilWidget(),
-                ),
-              ),
-            );
-          },
-        ),
-        const SizedBox(height: 10),
-        if (_rolActual == "admin") ...[
+          const SizedBox(height: 20),
           ListTile(
-            leading: const Icon(Icons.history_edu, color: Colors.purple),
-            title: const Text("Bitácora"),
-            subtitle: const Text("Historial de auditoría del sistema"),
+            leading: const Icon(Icons.person, color: Colors.cyan),
+            title: const Text("Perfil"),
+            subtitle: const Text("Ver tus datos y cambiar contraseña"),
             tileColor: Theme.of(context).cardColor,
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(15),
@@ -802,27 +1303,55 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
             onTap: () {
               Navigator.push(
                 context,
-                MaterialPageRoute(builder: (context) => const BitacoraScreen()),
+                MaterialPageRoute(
+                  builder: (context) => Scaffold(
+                    appBar: AppBar(title: const Text("Perfil")),
+                    body: _buildPerfilWidget(userData),
+                  ),
+                ),
               );
             },
           ),
           const SizedBox(height: 10),
-          ListTile(
-            leading: const Icon(Icons.admin_panel_settings, color: Colors.red),
-            title: const Text("Panel Admin"),
-            subtitle: const Text("Gestión de usuarios y sistema"),
-            tileColor: Theme.of(context).cardColor,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(15),
+          if (rolActual == "admin") ...[
+            ListTile(
+              leading: const Icon(Icons.history_edu, color: Colors.purple),
+              title: const Text("Bitácora"),
+              subtitle: const Text("Historial de auditoría del sistema"),
+              tileColor: Theme.of(context).cardColor,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(15),
+              ),
+              onTap: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => const BitacoraScreen(),
+                  ),
+                );
+              },
             ),
-            onTap: () => _mostrarPanelAdmin(context),
-          ),
+            const SizedBox(height: 10),
+            ListTile(
+              leading: const Icon(
+                Icons.admin_panel_settings,
+                color: Colors.red,
+              ),
+              title: const Text("Panel Admin"),
+              subtitle: const Text("Gestión de usuarios y sistema"),
+              tileColor: Theme.of(context).cardColor,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(15),
+              ),
+              onTap: () => _mostrarPanelAdmin(context, rolActual),
+            ),
+          ],
         ],
-      ],
+      ),
     );
   }
 
-  void _mostrarPanelAdmin(BuildContext context) {
+  void _mostrarPanelAdmin(BuildContext context, String rolActual) {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -882,23 +1411,25 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
               },
             ),
 
-            const SizedBox(height: 15),
-            // --- SECCIÓN BITÁCORA ---
-            _buildAdminActionTile(
-              icon: Icons.history_edu_rounded,
-              color: Colors.purple,
-              title: "Ver Bitácora de Eventos",
-              subtitle: "Historial de acciones y auditoría",
-              onTap: () {
-                Navigator.pop(context); // Cierra el modal de admin
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (context) => const BitacoraScreen(),
-                  ),
-                );
-              },
-            ),
+            if (rolActual == "admin") ...[
+              const SizedBox(height: 15),
+              // --- SECCIÓN BITÁCORA ---
+              _buildAdminActionTile(
+                icon: Icons.history_edu_rounded,
+                color: Colors.purple,
+                title: "Ver Bitácora de Eventos",
+                subtitle: "Historial de acciones y auditoría",
+                onTap: () {
+                  Navigator.pop(context); // Cierra el modal de admin
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (context) => const BitacoraScreen(),
+                    ),
+                  );
+                },
+              ),
+            ],
 
             const SizedBox(height: 15),
             // --- SECCIÓN PRUEBA FCM (Temporal) ---
@@ -1103,91 +1634,70 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
     );
   }
 
-  Widget _buildPerfilWidget() {
+  Widget _buildPerfilWidget(Map<String, dynamic> data) {
     final User? userAuth = FirebaseAuth.instance.currentUser;
     if (userAuth == null) {
       return const Center(child: Text("No hay sesión activa"));
     }
-    return FutureBuilder<DocumentSnapshot>(
-      future: FirebaseFirestore.instance
-          .collection('Trabajadores')
-          .doc(userAuth.uid)
-          .get(),
-      builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Center(child: CircularProgressIndicator());
-        }
-        if (snapshot.hasError) {
-          return Center(child: Text("Error: ${snapshot.error}"));
-        }
-        if (!snapshot.hasData || !snapshot.data!.exists) {
-          return const Center(
-            child: Text("No se encontraron tus datos en la base."),
-          );
-        }
-        final data = snapshot.data!.data() as Map<String, dynamic>;
 
-        return SingleChildScrollView(
-          padding: const EdgeInsets.all(20),
-          child: Column(
-            children: [
-              const Icon(
-                Icons.account_circle,
-                size: 100,
-                color: Colors.blueGrey,
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(20),
+      child: Column(
+        children: [
+          const Icon(Icons.account_circle, size: 100, color: Colors.blueGrey),
+          const SizedBox(height: 20),
+          _infoCard("Usuario", data['usuario'] ?? 'No disponible'),
+          _infoCard("Nombre", data['nombre'] ?? 'No disponible'),
+          _infoCard("Apellido", data['apellido'] ?? 'No disponible'),
+          _infoCard("Rol", data['rol'] ?? 'No disponible'),
+          _infoCard("Correo", data['correo'] ?? 'No disponible'),
+          const SizedBox(height: 30),
+          ElevatedButton.icon(
+            onPressed: () async {
+              final scaffoldMessenger = ScaffoldMessenger.of(context);
+              final navigator = Navigator.of(context);
+              try {
+                await FirebaseAuth.instance.sendPasswordResetEmail(
+                  email: userAuth.email!,
+                );
+                if (mounted) {
+                  navigator.pop();
+                  scaffoldMessenger.showSnackBar(
+                    const SnackBar(
+                      content: Text("Correo de restablecimiento enviado"),
+                      backgroundColor: Colors.green,
+                    ),
+                  );
+                }
+              } catch (e) {
+                if (mounted) {
+                  scaffoldMessenger.showSnackBar(
+                    SnackBar(
+                      content: Text("Error: $e"),
+                      backgroundColor: Colors.red,
+                    ),
+                  );
+                }
+              }
+            },
+            icon: const Icon(Icons.lock_reset_rounded),
+            label: const Text("Cambiar Contraseña"),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.secondary,
+              foregroundColor: Colors.white,
+              minimumSize: const Size(double.infinity, 50),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(15),
               ),
-              const SizedBox(height: 20),
-              _infoCard("Usuario", data['usuario'] ?? 'No disponible'),
-              _infoCard("Nombre", data['nombre'] ?? 'No disponible'),
-              _infoCard("Apellido", data['apellido'] ?? 'No disponible'),
-              _infoCard("Rol", data['rol'] ?? 'No disponible'),
-              _infoCard("Correo", data['correo'] ?? 'No disponible'),
-              const SizedBox(height: 30),
-              ElevatedButton.icon(
-                onPressed: () async {
-                  try {
-                    await FirebaseAuth.instance.sendPasswordResetEmail(
-                      email: userAuth.email!,
-                    );
-                    if (context.mounted) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text("Correo de restablecimiento enviado"),
-                          backgroundColor: Colors.green,
-                        ),
-                      );
-                    }
-                  } catch (e) {
-                    if (context.mounted) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text("Error: $e"),
-                          backgroundColor: Colors.red,
-                        ),
-                      );
-                    }
-                  }
-                },
-                icon: const Icon(Icons.lock_reset_rounded),
-                label: const Text("Cambiar Contraseña"),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.cyan[600],
-                  foregroundColor: Colors.white,
-                  minimumSize: const Size(double.infinity, 50),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(15),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 30),
-              Text(
-                "ID: ${userAuth.uid}",
-                style: const TextStyle(fontSize: 10, color: Colors.grey),
-              ),
-            ],
+            ),
           ),
-        );
-      },
+          const SizedBox(height: 30),
+          Text(
+            "ID: ${userAuth.uid}",
+            style: const TextStyle(fontSize: 10, color: Colors.grey),
+          ),
+        ],
+      ),
     );
   }
 
@@ -1207,8 +1717,11 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
     );
   }
 
-  // El [Pedido? pedido] significa que es opcional (sirve para Crear y para Editar)
-  void _mostrarDialogoNuevoPedido(BuildContext context, [Pedido? pedido]) {
+  void _mostrarDialogoNuevoPedido(
+    BuildContext context,
+    String nombreCompleto, [
+    Pedido? pedido,
+  ]) {
     final TextEditingController ticketController = TextEditingController(
       text: pedido?.ticket ?? "",
     );
@@ -1217,16 +1730,20 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
     );
 
     // Controladores de cantidad (comportamiento bancario/numérico)
-    final TextEditingController cantSacoCont = TextEditingController(text: "1");
+    final TextEditingController cantSacoCont = TextEditingController(
+      text: pedido != null ? pedido.cantSaco.toString() : "1",
+    );
     final TextEditingController cantBolsaCont = TextEditingController(
-      text: "1",
+      text: pedido != null ? pedido.cantBolsa.toString() : "1",
     );
 
-    String ordenSeleccionada = "Saco"; // Saco, Bolsa, Mixto
-    String? subTipoSaco = "Saco Público";
-    String? subTipoBolsa = "Bolsa Público";
-    String? idClienteSeleccionado;
-    String nombreClienteLabel = "Seleccionar Cliente (Opcional)";
+    String ordenSeleccionada = pedido?.orden ?? "Saco"; // Saco, Bolsa, Mixto
+    String? subTipoSaco = pedido?.detalleSaco ?? "Saco Público";
+    String? subTipoBolsa = pedido?.detalleBolsa ?? "Bolsa Público";
+    String? idClienteSeleccionado = pedido?.idCliente;
+    String nombreClienteLabel = idClienteSeleccionado != null
+        ? "Cargando cliente..."
+        : "Seleccionar Cliente (Opcional)";
 
     showDialog(
       context: context,
@@ -1283,6 +1800,7 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
                             final clientes = snap.data!.docs;
                             return DropdownButton<String>(
                               isExpanded: true,
+                              value: idClienteSeleccionado,
                               hint: const Text(
                                 "Elegir cliente",
                                 style: TextStyle(fontSize: 12),
@@ -1290,6 +1808,20 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
                               underline: const SizedBox(),
                               items: clientes.map((c) {
                                 final d = c.data() as Map<String, dynamic>;
+                                if (c.id == idClienteSeleccionado &&
+                                    nombreClienteLabel ==
+                                        "Cargando cliente...") {
+                                  // Actualizamos la etiqueta del cliente si ya está cargado
+                                  // Nota: Esto ocurre durante el build, pero setState disparará otro build seguro.
+                                  Future.microtask(() {
+                                    if (context.mounted) {
+                                      setState(() {
+                                        nombreClienteLabel =
+                                            "Cliente: ${d['Nombre']} ${d['Apellido']}";
+                                      });
+                                    }
+                                  });
+                                }
                                 return DropdownMenuItem(
                                   value: c.id,
                                   child: Text(
@@ -1424,49 +1956,35 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
                   mapaDescuento = {"DWDbVnRf5nqGu8uTu3KA": cantBolsa};
                 }
 
-                // Definimos el mapa (Esto es lo que tenías y causaba el warning)
-                final Map<String, dynamic> dataPedido = {
-                  'Monto_total': monto,
-                  'N_ticket': ticketController.text,
-                  'creado_por': _nombreCompleto,
-                  'despachado_por': "",
-                  'estado': "Pendiente",
-                  'fecha': FieldValue.serverTimestamp(),
-                  'fecha_despacho': null,
-                  'tipo_hielo': {
-                    'categoria': categoriaFinal,
-                    'orden': ordenSeleccionada,
-                    'detalle_saco': ordenSeleccionada != "Bolsa"
-                        ? subTipoSaco
-                        : null,
-                    'detalle_bolsa': ordenSeleccionada != "Saco"
-                        ? subTipoBolsa
-                        : null,
-                    'cantidad_saco': cantSaco,
-                    'cantidad_bolsa': cantBolsa,
-                  },
-                };
-
-                await _dbService.crearPedidoYDescontar(
-                  categoriaHielo:
-                      dataPedido['tipo_hielo']['categoria'], // Usando la variable
-                  monto: dataPedido['Monto_total'], // Usando la variable
-                  ticket: dataPedido['N_ticket'], // Usando la variable
-                  productosYCantidades: mapaDescuento,
-                  nombreCreador: dataPedido['creado_por'], // Usando la variable
-                  idCliente: idClienteSeleccionado,
-                );
-
-                // Como DatabaseService aún no tiene idCliente en la firma de crearPedidoYDescontar (la actualizo ahora)
-                // Usaré un update manual por ahora o actualizaremos el servicio. Mejor actualizo el servicio en el siguiente paso.
+                if (pedido == null) {
+                  await _dbService.crearPedidoYDescontar(
+                    categoriaHielo: categoriaFinal,
+                    monto: monto,
+                    ticket: ticketController.text,
+                    productosYCantidades: mapaDescuento,
+                    nombreCreador: nombreCompleto,
+                    idCliente: idClienteSeleccionado,
+                  );
+                } else {
+                  await _dbService.actualizarPedido(
+                    id: pedido.id,
+                    categoriaHielo: categoriaFinal,
+                    monto: monto,
+                    ticket: ticketController.text,
+                    productosYCantidades: mapaDescuento,
+                    nombreCreador: nombreCompleto,
+                    idCliente: idClienteSeleccionado,
+                    cantPrevia: {
+                      "NZAtCFwTfLTwb3xiiOUk": pedido.cantSaco,
+                      "DWDbVnRf5nqGu8uTu3KA": pedido.cantBolsa,
+                    },
+                  );
+                }
 
                 if (context.mounted) {
                   Navigator.pop(context);
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text("Se ha registrado correctamente"),
-                      backgroundColor: Colors.green,
-                    ),
+                  _notificarExito(
+                    "Pedido #${ticketController.text} guardado correctamente",
                   );
                 }
               },
@@ -1488,7 +2006,7 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
         onSelected: (bool selected) {
           if (selected) setState(() => _filtroEstado = valor);
         },
-        selectedColor: Colors.cyan,
+        selectedColor: AppColors.secondary,
         backgroundColor: Colors.white,
         labelStyle: TextStyle(
           color: seleccionado ? Colors.white : Colors.blueGrey,
@@ -1508,48 +2026,87 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
     );
   }
 
-  Widget _buildBadgeEstado(String estado, [bool sinStock = false]) {
-    Color color;
-    String texto = estado;
-
-    if (sinStock && estado == 'Pendiente') {
-      color = Colors.deepOrange;
-      texto = "SIN STOCK";
-    } else {
-      switch (estado) {
-        case 'Pendiente':
-          color = Colors.orange;
-          break;
-        case 'Despachado':
-          color = Colors.green;
-          break;
-        case 'Cancelado':
-          color = Colors.red;
-          break;
-        default:
-          color = Colors.grey;
-      }
-    }
-
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.1),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: color),
-      ),
-      child: Text(
-        texto,
-        style: TextStyle(
-          color: color,
-          fontSize: 10,
-          fontWeight: FontWeight.bold,
+  // MÉTODO PARA NOTIFICACIONES FLOTANTES EN LA PARTE SUPERIOR
+  void _notificarExito(String mensaje) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Row(
+          children: [
+            const Icon(Icons.check_circle, color: Colors.white, size: 20),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                mensaje,
+                style: const TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 14,
+                ),
+              ),
+            ),
+          ],
         ),
+        behavior: SnackBarBehavior.floating,
+        backgroundColor: AppColors.primary,
+        duration: const Duration(seconds: 3),
+        margin: EdgeInsets.only(
+          bottom: MediaQuery.of(context).size.height - 140,
+          left: 20,
+          right: 20,
+        ),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+        elevation: 8,
       ),
     );
   }
 
-  void _mostrarDetalleCompleto(BuildContext context, Pedido pedido) {
+  void _confirmarAccion({
+    required BuildContext context,
+    required String titulo,
+    required String mensaje,
+    required Color colorBoton,
+    required String textoBoton,
+    required VoidCallback onConfirm,
+  }) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(titulo, style: const TextStyle(color: AppColors.primary)),
+        content: Text(mensaje),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text("Atrás"),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.pop(context);
+              onConfirm();
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: colorBoton,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10),
+              ),
+            ),
+            child: Text(
+              textoBoton,
+              style: const TextStyle(color: Colors.white),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _mostrarDetalleCompleto(
+    BuildContext context,
+    Pedido pedido,
+    String rolActual,
+    String nombreCompleto,
+  ) {
     showModalBottomSheet(
       context: context,
       shape: const RoundedRectangleBorder(
@@ -1611,7 +2168,7 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
                 ),
                 const SizedBox(height: 20),
                 // Botón de edición solo para el Admin
-                if (_rolActual == "admin")
+                if (rolActual == "admin")
                   SizedBox(
                     width: double.infinity,
                     child: ElevatedButton.icon(
@@ -1622,9 +2179,9 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
                         // Cierra el modal de detalles
                         _mostrarDialogoNuevoPedido(
                           context,
+                          nombreCompleto,
                           pedido,
-                        ); // <--- ESTO ES LO QUE FALTA
-                        // Aquí llamarías a tu diálogo de edición
+                        );
                       },
                     ),
                   ),
@@ -1769,7 +2326,7 @@ class _EstadisticasScreenState extends State<_EstadisticasScreen> {
           barRods: [
             BarChartRodData(
               toY: sumaDia,
-              color: Colors.cyan,
+              color: AppColors.secondary,
               width: 15,
               borderRadius: BorderRadius.circular(4),
             ),
@@ -1902,7 +2459,7 @@ class _EstadisticasScreenState extends State<_EstadisticasScreen> {
                         "${c['compras']} compras",
                         style: const TextStyle(
                           fontWeight: FontWeight.bold,
-                          color: Colors.cyan,
+                          color: AppColors.secondary,
                         ),
                       ),
                     ),
@@ -1939,80 +2496,361 @@ class _EstadisticasScreenState extends State<_EstadisticasScreen> {
   }
 }
 
-class BitacoraScreen extends StatelessWidget {
+class BitacoraScreen extends StatefulWidget {
   const BitacoraScreen({super.key});
+
+  @override
+  State<BitacoraScreen> createState() => _BitacoraScreenState();
+}
+
+class _BitacoraScreenState extends State<BitacoraScreen> {
+  final DatabaseService _dbService = DatabaseService();
+  String? _filtroNombre;
+  String? _filtroCorreo;
+  String? _filtroAccion;
+
+  final TextEditingController _searchController = TextEditingController();
+  String _tipoFiltro = 'Ninguno'; // Ninguno, Nombre, Correo, Acción
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
         title: const Text("Bitácora del Sistema"),
-        backgroundColor: Colors.cyan[600],
+        backgroundColor: AppColors.primary,
         foregroundColor: Colors.white,
       ),
-      body: StreamBuilder<QuerySnapshot>(
-        stream: FirebaseFirestore.instance
-            .collection('Bitacora')
-            .orderBy('fecha', descending: true)
-            .snapshots(),
-        builder: (context, snapshot) {
-          if (snapshot.hasError) {
-            return const Center(child: Text("Error al cargar la bitácora"));
-          }
-          if (!snapshot.hasData) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          final eventos = snapshot.data!.docs;
-
-          if (eventos.isEmpty) {
-            return const Center(child: Text("No hay registros en la bitácora"));
-          }
-
-          return ListView.separated(
-            padding: const EdgeInsets.all(10),
-            itemCount: eventos.length,
-            separatorBuilder: (context, index) => const Divider(),
-            itemBuilder: (context, index) {
-              final data = eventos[index].data() as Map<String, dynamic>;
-              final DateTime? fecha = (data['fecha'] as Timestamp?)?.toDate();
-
-              return ListTile(
-                leading: CircleAvatar(
-                  backgroundColor: Colors.purple.withValues(alpha: 0.1),
-                  child: const Icon(Icons.history_edu, color: Colors.purple),
-                ),
-                title: Text(
-                  data['accion'] ?? 'Sin acción',
-                  style: const TextStyle(fontWeight: FontWeight.bold),
-                ),
-                subtitle: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+      body: Column(
+        children: [
+          // --- BARRA DE FILTROS ---
+          Container(
+            padding: const EdgeInsets.all(12),
+            color: AppColors.primary.withValues(alpha: 0.05),
+            child: Column(
+              children: [
+                Row(
                   children: [
-                    Text(data['detalle'] ?? 'Sin detalle'),
-                    const SizedBox(height: 4),
-                    Text(
-                      "Usuario: ${data['usuario'] ?? 'Sistema'}",
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: Colors.grey[600],
-                        fontStyle: FontStyle.italic,
+                    const Icon(
+                      Icons.filter_list,
+                      size: 20,
+                      color: AppColors.secondary,
+                    ),
+                    const SizedBox(width: 8),
+                    const Text(
+                      "Filtrar por:",
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: DropdownButton<String>(
+                        isExpanded: true,
+                        value: _tipoFiltro,
+                        items: ['Ninguno', 'Nombre', 'Correo', 'Acción']
+                            .map(
+                              (t) => DropdownMenuItem(value: t, child: Text(t)),
+                            )
+                            .toList(),
+                        onChanged: (val) {
+                          setState(() {
+                            _tipoFiltro = val!;
+                            _filtroNombre = null;
+                            _filtroCorreo = null;
+                            _filtroAccion = null;
+                            _searchController.clear();
+                          });
+                        },
                       ),
                     ),
                   ],
                 ),
-                trailing: Text(
-                  fecha != null
-                      ? "${fecha.day}/${fecha.month}/${fecha.year}\n${fecha.hour}:${fecha.minute.toString().padLeft(2, '0')}"
-                      : '--:--',
-                  textAlign: TextAlign.right,
-                  style: const TextStyle(fontSize: 11, color: Colors.grey),
-                ),
-                isThreeLine: true,
-              );
-            },
-          );
-        },
+                if (_tipoFiltro != 'Ninguno') ...[
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: _searchController,
+                    decoration: InputDecoration(
+                      hintText: "Escribe el ${_tipoFiltro.toLowerCase()}...",
+                      prefixIcon: const Icon(Icons.search),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                      ),
+                      suffixIcon: IconButton(
+                        icon: const Icon(Icons.check_circle),
+                        onPressed: () {
+                          setState(() {
+                            if (_tipoFiltro == 'Nombre') {
+                              _filtroNombre = _searchController.text.trim();
+                            } else if (_tipoFiltro == 'Correo') {
+                              _filtroCorreo = _searchController.text.trim();
+                            } else if (_tipoFiltro == 'Acción') {
+                              _filtroAccion = _searchController.text.trim();
+                            }
+                          });
+                        },
+                      ),
+                    ),
+                    onSubmitted: (val) {
+                      setState(() {
+                        if (_tipoFiltro == 'Nombre') _filtroNombre = val.trim();
+                        if (_tipoFiltro == 'Correo') _filtroCorreo = val.trim();
+                        if (_tipoFiltro == 'Acción') _filtroAccion = val.trim();
+                      });
+                    },
+                  ),
+                ],
+              ],
+            ),
+          ),
+
+          // --- LISTADO DE EVENTOS ---
+          Expanded(
+            child: StreamBuilder<QuerySnapshot>(
+              stream: _dbService.streamBitacora(
+                filtroNombre: _filtroNombre,
+                filtroCorreo: _filtroCorreo,
+                filtroAccion: _filtroAccion,
+              ),
+              builder: (context, snapshot) {
+                if (snapshot.hasError) {
+                  return Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Icon(
+                          Icons.error_outline,
+                          color: Colors.red,
+                          size: 40,
+                        ),
+                        const SizedBox(height: 10),
+                        const Text("Error al cargar la bitácora"),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 40),
+                          child: Text(
+                            snapshot.error.toString(),
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(
+                              fontSize: 12,
+                              color: Colors.grey,
+                            ),
+                          ),
+                        ),
+                        if (snapshot.error.toString().contains('index'))
+                          const Padding(
+                            padding: EdgeInsets.all(20),
+                            child: Text(
+                              "Nota: Asegúrate de que los índices compuestos estén habilitados en Firestore Console.",
+                              style: TextStyle(
+                                color: Colors.orange,
+                                fontWeight: FontWeight.bold,
+                              ),
+                              textAlign: TextAlign.center,
+                            ),
+                          ),
+                      ],
+                    ),
+                  );
+                }
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+
+                final eventos = snapshot.data?.docs ?? [];
+
+                if (eventos.isEmpty) {
+                  return const Center(
+                    child: Text("No hay registros que coincidan"),
+                  );
+                }
+
+                return ListView.separated(
+                  padding: const EdgeInsets.all(10),
+                  itemCount: eventos.length,
+                  separatorBuilder: (context, index) => const Divider(),
+                  itemBuilder: (context, index) {
+                    final data = eventos[index].data() as Map<String, dynamic>;
+                    final DateTime? fecha = (data['fecha'] as Timestamp?)
+                        ?.toDate();
+
+                    return ListTile(
+                      leading: CircleAvatar(
+                        backgroundColor: Colors.purple.withValues(alpha: 0.1),
+                        child: const Icon(
+                          Icons.history_edu,
+                          color: Colors.purple,
+                        ),
+                      ),
+                      title: Text(
+                        data['accion'] ?? 'Sin acción',
+                        style: const TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                      subtitle: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(data['detalle'] ?? 'Sin detalle'),
+                          const SizedBox(height: 4),
+                          Text(
+                            "Por: ${data['nombre_usuario'] ?? 'Usuario'} (${data['usuario'] ?? 'Email'})",
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: Colors.grey[600],
+                              fontStyle: FontStyle.italic,
+                            ),
+                          ),
+                        ],
+                      ),
+                      trailing: Text(
+                        fecha != null
+                            ? "${fecha.day}/${fecha.month}/${fecha.year}\n${fecha.hour}:${fecha.minute.toString().padLeft(2, '0')}"
+                            : '--:--',
+                        textAlign: TextAlign.right,
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: Colors.grey,
+                        ),
+                      ),
+                      isThreeLine: true,
+                    );
+                  },
+                );
+              },
+            ),
+          ),
+        ],
       ),
+    );
+  }
+}
+
+// --- WIDGETS DE VISTA PRIVADOS ---
+
+class _EscritorioView extends StatelessWidget {
+  final String nombreCompleto;
+  final String rolActual;
+  final Map<String, dynamic> userData;
+  final int sacoFisico;
+  final int sacoComp;
+  final int bolsaFisico;
+  final int bolsaComp;
+  final bool esInvitado;
+  final VoidCallback onToggleTheme;
+  final _PanelPrincipalState parent;
+
+  const _EscritorioView({
+    required this.nombreCompleto,
+    required this.rolActual,
+    required this.userData,
+    required this.sacoFisico,
+    required this.sacoComp,
+    required this.bolsaFisico,
+    required this.bolsaComp,
+    required this.esInvitado,
+    required this.onToggleTheme,
+    required this.parent,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Row(
+        children: [
+          if (!esInvitado) parent._buildNavigationRail(context, nombreCompleto),
+          Expanded(
+            child: parent._buildMainContent(
+              nombreCompleto: nombreCompleto,
+              rolActual: rolActual,
+              sacoFisico: sacoFisico,
+              sacoComp: sacoComp,
+              bolsaFisico: bolsaFisico,
+              bolsaComp: bolsaComp,
+              userData: userData,
+              showHeader: true,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MovilView extends StatelessWidget {
+  final String nombreCompleto;
+  final String rolActual;
+  final Map<String, dynamic> userData;
+  final int sacoFisico;
+  final int sacoComp;
+  final int bolsaFisico;
+  final int bolsaComp;
+  final bool esInvitado;
+  final VoidCallback onToggleTheme;
+  final _PanelPrincipalState parent;
+
+  const _MovilView({
+    required this.nombreCompleto,
+    required this.rolActual,
+    required this.userData,
+    required this.sacoFisico,
+    required this.sacoComp,
+    required this.bolsaFisico,
+    required this.bolsaComp,
+    required this.esInvitado,
+    required this.onToggleTheme,
+    required this.parent,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Image.asset('assets/frifalca6.png', height: 35),
+        centerTitle: true,
+        backgroundColor: AppColors.primary,
+        iconTheme: const IconThemeData(color: Colors.white),
+        actions: [
+          IconButton(
+            icon: Icon(
+              Theme.of(context).brightness == Brightness.dark
+                  ? Icons.light_mode
+                  : Icons.dark_mode,
+            ),
+            onPressed: onToggleTheme,
+          ),
+        ],
+      ),
+      drawer: esInvitado
+          ? null
+          : parent._buildDrawer(context, nombreCompleto, rolActual),
+      body: parent._buildMainContent(
+        nombreCompleto: nombreCompleto,
+        rolActual: rolActual,
+        sacoFisico: sacoFisico,
+        sacoComp: sacoComp,
+        bolsaFisico: bolsaFisico,
+        bolsaComp: bolsaComp,
+        userData: userData,
+        showHeader:
+            false, // El AppBar móvil reemplaza la cabecera del contenido
+      ),
+      floatingActionButton: esInvitado
+          ? FloatingActionButton.extended(
+              onPressed: () => Navigator.pop(context),
+              label: const Text("Login"),
+              icon: const Icon(Icons.login),
+              backgroundColor: AppColors.secondary,
+            )
+          : FloatingActionButton(
+              onPressed: () =>
+                  parent._mostrarDialogoNuevoPedido(context, nombreCompleto),
+              backgroundColor: AppColors.secondary,
+              elevation: 4,
+              shape: const CircleBorder(),
+              child: const Icon(Icons.add, color: Colors.white, size: 30),
+            ),
+      floatingActionButtonLocation: esInvitado
+          ? FloatingActionButtonLocation.centerFloat
+          : FloatingActionButtonLocation.centerDocked,
+      bottomNavigationBar: esInvitado ? null : parent._buildBottomNav(context),
     );
   }
 }

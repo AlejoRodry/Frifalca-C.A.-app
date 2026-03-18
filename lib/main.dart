@@ -8,6 +8,11 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:async';
 import 'panel_principal.dart';
+import 'registro_trabajador_screen.dart';
+import 'componentes_de_inventario.dart' as comp;
+import 'package:google_fonts/google_fonts.dart';
+import 'theme.dart';
+import 'dart:ui';
 
 // La biometría se maneja dinámicamente en los métodos correspondientes para evitar fallos en Web.
 
@@ -24,8 +29,32 @@ void main() async {
     }
   }
 
-  // Prueba de vida: Si en 6 segundos no ha cargado Firebase, forzamos error
-  Timer(const Duration(seconds: 6), () {
+  // Manejo de errores visuales (Debug)
+  ErrorWidget.builder = (FlutterErrorDetails details) {
+    return Material(
+      child: Container(
+        color: const Color(0xFF0A2540),
+        padding: const EdgeInsets.all(20),
+        child: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.bug_report, color: Color(0xFF00D4FF), size: 50),
+              const SizedBox(height: 15),
+              Text(
+                "Error de Renderizado:\n${details.exception}",
+                style: const TextStyle(color: Colors.white, fontSize: 14),
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  };
+
+  // Prueba de vida: Margen extendido para carga de recursos pesados en Web
+  Timer(Duration(seconds: kIsWeb ? 25 : 12), () {
     if (!appStarted) {
       startApp(
         MaterialApp(
@@ -72,10 +101,10 @@ void main() async {
   try {
     debugPrint("Iniciando Firebase (Web: $kIsWeb)...");
 
-    // Inicialización de Firebase con un timeout interno de seguridad
+    // Inicialización de Firebase con un timeout extendido para Web
     await Firebase.initializeApp(
       options: DefaultFirebaseOptions.currentPlatform,
-    ).timeout(const Duration(seconds: 5));
+    ).timeout(Duration(seconds: kIsWeb ? 20 : 10));
 
     startApp(const ThemeWrapper());
   } catch (e) {
@@ -182,39 +211,16 @@ class _ThemeWrapperState extends State<ThemeWrapper> {
       title: 'Frifalca',
       debugShowCheckedModeBanner: false,
       themeMode: _themeMode,
-      theme: ThemeData(
-        useMaterial3: true,
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF00BCD4),
-          primary: const Color(0xFF00BCD4),
-          surface: Colors.white,
-        ),
-        scaffoldBackgroundColor: const Color(0xFFF0F9FA),
-        cardTheme: CardThemeData(
-          elevation: 2,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(20),
-          ),
-          color: Colors.white,
-        ),
+      scrollBehavior: const MaterialScrollBehavior().copyWith(
+        dragDevices: {
+          PointerDeviceKind.mouse,
+          PointerDeviceKind.touch,
+          PointerDeviceKind.stylus,
+          PointerDeviceKind.trackpad,
+        },
       ),
-      darkTheme: ThemeData(
-        useMaterial3: true,
-        colorScheme: ColorScheme.fromSeed(
-          brightness: Brightness.dark,
-          seedColor: const Color(0xFF00BCD4),
-          primary: const Color(0xFF00BCD4),
-          surface: const Color(0xFF1E1E1E),
-        ),
-        scaffoldBackgroundColor: const Color(0xFF121212),
-        cardTheme: CardThemeData(
-          elevation: 2,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(20),
-          ),
-          color: const Color(0xFF2C2C2C),
-        ),
-      ),
+      theme: AppTheme.lightTheme,
+      darkTheme: AppTheme.darkTheme,
       initialRoute: '/',
       home: StreamBuilder<User?>(
         stream: FirebaseAuth.instance.authStateChanges(),
@@ -402,6 +408,201 @@ class _Login extends State<Login> {
     }
   }
 
+  void _entrarComoInvitado() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 30),
+        decoration: BoxDecoration(
+          color: Theme.of(context).cardColor,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(30)),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 50,
+              height: 5,
+              decoration: BoxDecoration(
+                color: Colors.grey[400],
+                borderRadius: BorderRadius.circular(10),
+              ),
+            ),
+            const SizedBox(height: 25),
+            const Text(
+              "Estado del Inventario",
+              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 25),
+            StreamBuilder<QuerySnapshot>(
+              stream: FirebaseFirestore.instance
+                  .collection('Productos')
+                  .snapshots(),
+              builder: (context, snapshot) {
+                if (snapshot.hasError) {
+                  return const Text("Error al cargar datos");
+                }
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+
+                int sacoFisico = 0, sacoComp = 0;
+                int bolsaFisico = 0, bolsaComp = 0;
+
+                for (var doc in snapshot.data!.docs) {
+                  final data = doc.data() as Map<String, dynamic>;
+                  if (doc.id == "NZAtCFwTfLTwb3xiiOUk") {
+                    sacoFisico = (data['stock_fisico'] as num? ?? 0).toInt();
+                    sacoComp = (data['stock_comprometido'] as num? ?? 0)
+                        .toInt();
+                  }
+                  if (doc.id == "DWDbVnRf5nqGu8uTu3KA") {
+                    bolsaFisico = (data['stock_fisico'] as num? ?? 0).toInt();
+                    bolsaComp = (data['stock_comprometido'] as num? ?? 0)
+                        .toInt();
+                  }
+                }
+
+                return comp.InventarioResumenCard(
+                  sacoFisico: sacoFisico,
+                  sacoComp: sacoComp,
+                  bolsaFisico: bolsaFisico,
+                  bolsaComp: bolsaComp,
+                  onAjustar: (id, cantidad) {},
+                  readOnly: true,
+                );
+              },
+            ),
+            const SizedBox(height: 20),
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text("Cerrar"),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _mostrarModalContrasena() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setModalState) => Container(
+          padding: EdgeInsets.only(
+            bottom: MediaQuery.of(context).viewInsets.bottom,
+          ),
+          decoration: BoxDecoration(
+            color: Theme.of(context).cardColor,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(30)),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.all(30.0),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 50,
+                  height: 5,
+                  decoration: BoxDecoration(
+                    color: Colors.grey[400],
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                ),
+                const SizedBox(height: 25),
+                const Text(
+                  "Ingreso con Contraseña",
+                  style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 25),
+                if (_usuarioRecordado == null) ...[
+                  _buildLabel("CORREO/USUARIO", isModal: true),
+                  const SizedBox(height: 10),
+                  _buildTextField(
+                    controller: _emailController,
+                    hint: "ejemplo@correo.com",
+                    icon: Icons.email_outlined,
+                    isModal: true,
+                  ),
+                  const SizedBox(height: 20),
+                ],
+                _buildLabel("CONTRASEÑA", isModal: true),
+                const SizedBox(height: 10),
+                _buildTextField(
+                  controller: _passwordController,
+                  hint: "****",
+                  icon: _oscurecerPassword
+                      ? Icons.visibility_off_outlined
+                      : Icons.visibility_outlined,
+                  obscure: _oscurecerPassword,
+                  onIconPressed: () => setModalState(
+                    () => _oscurecerPassword = !_oscurecerPassword,
+                  ),
+                  isPassword: true,
+                  isModal: true,
+                ),
+                const SizedBox(height: 30),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppColors.secondary,
+                    foregroundColor: Colors.white,
+                    minimumSize: const Size(double.infinity, 55),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(15),
+                    ),
+                  ),
+                  onPressed: () {
+                    Navigator.pop(context);
+                    _procesarLogin();
+                  },
+                  child: const Text(
+                    "Entrar ahora",
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                  ),
+                ),
+                if (_usuarioRecordado != null) ...[
+                  const SizedBox(height: 15),
+                  TextButton.icon(
+                    onPressed: _entrarComoInvitado,
+                    icon: const Icon(Icons.visibility_outlined, size: 18),
+                    label: const Text("Ver Inventario General (Público)"),
+                    style: TextButton.styleFrom(
+                      foregroundColor: Colors.grey[600],
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  TextButton(
+                    onPressed: () async {
+                      Navigator.pop(context);
+                      final prefs = await SharedPreferences.getInstance();
+                      await prefs.clear();
+                      setState(() {
+                        _usuarioRecordado = null;
+                        _correoRecordado = null;
+                        _mantenerSesion = false;
+                        _emailController.clear();
+                        _passwordController.clear();
+                      });
+                    },
+                    child: const Text(
+                      "Usar otra cuenta",
+                      style: TextStyle(color: Colors.grey),
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 10),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     bool isDark = Theme.of(context).brightness == Brightness.dark;
@@ -439,8 +640,8 @@ class _Login extends State<Login> {
             begin: Alignment.topCenter,
             end: Alignment.bottomCenter,
             colors: isDark
-                ? [const Color(0xFF0D1B2A), const Color(0xFF1B263B)]
-                : [const Color(0xFF0251A4), const Color(0xFF00A8CC)],
+                ? [const Color(0xFF05121F), AppColors.primary]
+                : [AppColors.primary, const Color(0xFF0E3D6B)],
           ),
         ),
         child: SafeArea(
@@ -456,180 +657,238 @@ class _Login extends State<Login> {
                 ),
                 const SizedBox(height: 30),
 
-                // --- Glassmorphic Login Card ---
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(35),
-                  decoration: BoxDecoration(
-                    color: Colors.white.withValues(alpha: 0.1),
-                    borderRadius: BorderRadius.circular(40),
-                    border: Border.all(
-                      color: Colors.white.withValues(alpha: 0.2),
-                      width: 1,
+                // --- Glassmorphic Login Card (Optimizado para Web) ---
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 500),
+                  child: Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(35),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(40),
+                      border: Border.all(
+                        color: Colors.white.withValues(alpha: 0.2),
+                        width: 1,
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: 0.2),
+                          blurRadius: 30,
+                          offset: const Offset(0, 10),
+                        ),
+                      ],
                     ),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withValues(alpha: 0.2),
-                        blurRadius: 30,
-                        offset: const Offset(0, 10),
-                      ),
-                    ],
-                  ),
-                  child: Column(
-                    children: [
-                      Text(
-                        _usuarioRecordado != null
-                            ? "¡Hola, $_usuarioRecordado!"
-                            : "Iniciar Sesión",
-                        style: const TextStyle(
-                          fontSize: 24,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.white,
+                    child: Column(
+                      children: [
+                        Text(
+                          _usuarioRecordado != null
+                              ? "¡Hola, $_usuarioRecordado!"
+                              : "Iniciar Sesión",
+                          style: Theme.of(context).textTheme.displayLarge
+                              ?.copyWith(color: Colors.white, fontSize: 24),
                         ),
-                      ),
-                      const SizedBox(height: 10),
-                      Container(
-                        width: 40,
-                        height: 4,
-                        decoration: BoxDecoration(
-                          color: Colors.cyanAccent,
-                          borderRadius: BorderRadius.circular(2),
-                        ),
-                      ),
-                      const SizedBox(height: 40),
-
-                      // --- Correo ---
-                      if (_usuarioRecordado == null) ...[
-                        _buildLabel("CORREO/USUARIO"),
                         const SizedBox(height: 10),
-                        _buildTextField(
-                          controller: _emailController,
-                          hint: "ejemplo@correo.com",
-                          icon: Icons.email_outlined,
-                        ),
-                        const SizedBox(height: 25),
-                      ],
-
-                      // --- Contraseña ---
-                      _buildLabel("CONTRASEÑA"),
-                      const SizedBox(height: 10),
-                      _buildTextField(
-                        controller: _passwordController,
-                        hint: "",
-                        icon: _oscurecerPassword
-                            ? Icons.visibility_off_outlined
-                            : Icons.visibility_outlined,
-                        obscure: _oscurecerPassword,
-                        onIconPressed: () => setState(
-                          () => _oscurecerPassword = !_oscurecerPassword,
-                        ),
-                        isPassword: true,
-                      ),
-                      // --- Mantener Sesión ---
-                      if (_usuarioRecordado == null) ...[
-                        SwitchListTile(
-                          title: const Text(
-                            "Mantener la sesión",
-                            style: TextStyle(color: Colors.white, fontSize: 14),
-                          ),
-                          value: _mantenerSesion,
-                          activeTrackColor: Colors.cyanAccent,
-                          onChanged: (val) =>
-                              setState(() => _mantenerSesion = val),
-                          contentPadding: EdgeInsets.zero,
-                        ),
-                      ],
-
-                      const SizedBox(height: 20),
-
-                      // --- Botón Entrar ---
-                      ElevatedButton(
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.cyan[600],
-                          foregroundColor: Colors.white,
-                          minimumSize: const Size(double.infinity, 60),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(20),
-                          ),
-                          elevation: 0,
-                        ),
-                        onPressed: _procesarLogin,
-                        child: const Text(
-                          "Iniciar sesión",
-                          style: TextStyle(
-                            fontSize: 18,
-                            fontWeight: FontWeight.bold,
+                        Container(
+                          width: 40,
+                          height: 4,
+                          decoration: BoxDecoration(
+                            color: AppColors.secondary,
+                            borderRadius: BorderRadius.circular(2),
                           ),
                         ),
-                      ),
+                        const SizedBox(height: 40),
 
-                      // --- Error Message ---
-                      if (_mensajeError.isNotEmpty)
-                        Padding(
-                          padding: const EdgeInsets.only(top: 20),
-                          child: Text(
-                            _mensajeError,
-                            style: const TextStyle(
-                              color: Colors.redAccent,
+                        // --- LÓGICA HÍBRIDA: WEB vs MÓVIL ---
+                        if (kIsWeb) ...[
+                          // WEB: Todo directo en pantalla
+                          if (_usuarioRecordado == null) ...[
+                            _buildLabel("CORREO/USUARIO"),
+                            const SizedBox(height: 10),
+                            _buildTextField(
+                              controller: _emailController,
+                              hint: "ejemplo@correo.com",
+                              icon: Icons.email_outlined,
+                            ),
+                            const SizedBox(height: 25),
+                          ],
+                          _buildLabel("CONTRASEÑA"),
+                          const SizedBox(height: 10),
+                          _buildTextField(
+                            controller: _passwordController,
+                            hint: "****",
+                            icon: _oscurecerPassword
+                                ? Icons.visibility_off_outlined
+                                : Icons.visibility_outlined,
+                            obscure: _oscurecerPassword,
+                            onIconPressed: () => setState(
+                              () => _oscurecerPassword = !_oscurecerPassword,
+                            ),
+                            isPassword: true,
+                          ),
+                          if (_usuarioRecordado == null) ...[
+                            SwitchListTile(
+                              title: const Text(
+                                "Mantener la sesión",
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 13,
+                                ),
+                              ),
+                              value: _mantenerSesion,
+                              activeTrackColor: AppColors.secondary,
+                              onChanged: (val) =>
+                                  setState(() => _mantenerSesion = val),
+                              contentPadding: EdgeInsets.zero,
+                            ),
+                          ],
+                          const SizedBox(height: 25),
+                          ElevatedButton(
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: AppColors.secondary,
+                              foregroundColor: Colors.white,
+                              minimumSize: const Size(double.infinity, 60),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              elevation: 0,
+                            ),
+                            onPressed: _procesarLogin,
+                            child: const Text(
+                              "Iniciar sesión",
+                              style: TextStyle(
+                                fontSize: 18,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                          // Link de inventario público solo si el usuario está recordado
+                          if (_usuarioRecordado != null) ...[
+                            const SizedBox(height: 20),
+                            TextButton.icon(
+                              onPressed: _entrarComoInvitado,
+                              icon: const Icon(
+                                Icons.visibility_outlined,
+                                size: 18,
+                              ),
+                              label: const Text(
+                                "Ver Inventario General (Público)",
+                              ),
+                              style: TextButton.styleFrom(
+                                foregroundColor: Colors.white70,
+                              ),
+                            ),
+                          ],
+                        ] else ...[
+                          // MÓVIL: Pantalla limpia
+                          if (_usuarioRecordado != null) ...[
+                            _buildAuthButton(
+                              label: "Usar Huella Digital",
+                              icon: Icons.fingerprint_rounded,
+                              onPressed: _autenticarConHuella,
+                              color: Colors.white.withValues(alpha: 0.1),
+                            ),
+                            const SizedBox(height: 20),
+                            TextButton.icon(
+                              onPressed: _entrarComoInvitado,
+                              icon: const Icon(
+                                Icons.visibility_outlined,
+                                size: 18,
+                              ),
+                              label: const Text(
+                                "Ver Inventario General (Público)",
+                              ),
+                              style: TextButton.styleFrom(
+                                foregroundColor: Colors.white70,
+                              ),
+                            ),
+                          ] else
+                            const Text(
+                              "Bienvenido a Frifalca",
+                              style: TextStyle(color: Colors.white70),
+                            ),
+                          const SizedBox(height: 20),
+                          _buildAuthButton(
+                            label: "Ingresar con contraseña",
+                            icon: Icons.lock_outline_rounded,
+                            onPressed: _mostrarModalContrasena,
+                            color: AppColors.secondary,
+                            isPrimary: true,
+                          ),
+                        ],
+                        // --- Error Message ---
+                        if (_mensajeError.isNotEmpty)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 20),
+                            child: Text(
+                              _mensajeError,
+                              style: const TextStyle(
+                                color: Colors.redAccent,
+                                fontSize: 13,
+                              ),
+                              textAlign: TextAlign.center,
+                            ),
+                          ),
+
+                        // --- Cambio de Usuario (Branding Frifalca) ---
+                        if (_usuarioRecordado != null) ...[
+                          const SizedBox(height: 20),
+                          TextButton(
+                            onPressed: () async {
+                              final prefs =
+                                  await SharedPreferences.getInstance();
+                              // Limpiamos solo los datos del usuario, conservamos el tema
+                              await prefs.remove('user_name');
+                              await prefs.remove('correo_recordado');
+                              await prefs.remove('user_password');
+
+                              if (!context.mounted) return;
+
+                              // Reiniciamos a la pantalla de login principal limpia
+                              Navigator.pushAndRemoveUntil(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (context) => Login(
+                                    title: widget.title,
+                                    onToggleTheme: widget.onToggleTheme,
+                                  ),
+                                ),
+                                (route) => false,
+                              );
+                            },
+                            child: Text(
+                              "¿No eres tú? Iniciar sesión con otra cuenta",
+                              style: GoogleFonts.inter(
+                                color: AppColors.secondary,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ),
+                        ],
+                        const SizedBox(height: 20),
+                        TextButton(
+                          onPressed: () {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (context) =>
+                                    const RegistroTrabajadorScreen(),
+                              ),
+                            );
+                          },
+                          child: const Text(
+                            "¿Fuiste pre-autorizado? Registrate aquí",
+                            style: TextStyle(
+                              color: Colors.white70,
                               fontSize: 13,
                             ),
-                            textAlign: TextAlign.center,
                           ),
                         ),
-                    ],
+                      ],
+                    ),
                   ),
                 ),
 
-                // --- Biometría ---
-                if (_usuarioRecordado != null && !kIsWeb) ...[
-                  const SizedBox(height: 30),
-                  GestureDetector(
-                    onTap: _autenticarConHuella,
-                    child: Column(
-                      children: [
-                        Container(
-                          padding: const EdgeInsets.all(15),
-                          decoration: BoxDecoration(
-                            color: Colors.white.withValues(alpha: 0.1),
-                            shape: BoxShape.circle,
-                            border: Border.all(
-                              color: Colors.white.withValues(alpha: 0.2),
-                            ),
-                          ),
-                          child: const Icon(
-                            Icons.fingerprint,
-                            size: 50,
-                            color: Colors.white,
-                          ),
-                        ),
-                        const SizedBox(height: 10),
-                        const Text(
-                          "Ingresar con huella",
-                          style: TextStyle(color: Colors.white70),
-                        ),
-                      ],
-                    ),
-                  ),
-                  TextButton(
-                    onPressed: () async {
-                      final prefs = await SharedPreferences.getInstance();
-                      await prefs.clear();
-                      setState(() {
-                        _usuarioRecordado = null;
-                        _correoRecordado = null;
-                        _mantenerSesion = false;
-                        _emailController.clear();
-                        _passwordController.clear();
-                      });
-                    },
-                    child: Text(
-                      "Usar otra cuenta",
-                      style: TextStyle(
-                        color: Colors.white.withValues(alpha: 0.6),
-                      ),
-                    ),
-                  ),
-                ],
                 const SizedBox(height: 20),
               ],
             ),
@@ -639,14 +898,41 @@ class _Login extends State<Login> {
     );
   }
 
-  Widget _buildLabel(String text) {
+  Widget _buildAuthButton({
+    required String label,
+    required IconData icon,
+    required VoidCallback onPressed,
+    required Color color,
+    bool isPrimary = false,
+  }) {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 12),
+      child: ElevatedButton.icon(
+        onPressed: onPressed,
+        icon: Icon(icon, size: 22),
+        label: Text(label),
+        style: ElevatedButton.styleFrom(
+          backgroundColor: color,
+          foregroundColor: Colors.white,
+          padding: const EdgeInsets.symmetric(vertical: 18),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(15),
+          ),
+          elevation: isPrimary ? 2 : 0,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildLabel(String text, {bool isModal = false}) {
     return Align(
       alignment: Alignment.centerLeft,
       child: Text(
         text,
-        style: const TextStyle(
-          color: Colors.white70,
-          fontSize: 12,
+        style: TextStyle(
+          color: isModal ? Colors.grey[700] : Colors.white70,
+          fontSize: 11,
           fontWeight: FontWeight.bold,
           letterSpacing: 1.2,
         ),
@@ -661,31 +947,47 @@ class _Login extends State<Login> {
     bool obscure = false,
     VoidCallback? onIconPressed,
     bool isPassword = false,
+    bool isModal = false,
   }) {
     return TextField(
       controller: controller,
       obscureText: obscure,
-      style: const TextStyle(color: Colors.white),
+      style: TextStyle(color: isModal ? Colors.black87 : Colors.white),
       decoration: InputDecoration(
         hintText: hint,
-        hintStyle: TextStyle(color: Colors.white.withValues(alpha: 0.4)),
+        hintStyle: TextStyle(
+          color: isModal
+              ? Colors.grey.withValues(alpha: 0.5)
+              : Colors.white.withValues(alpha: 0.4),
+        ),
         filled: true,
-        fillColor: Colors.white.withValues(alpha: 0.1),
+        fillColor: isModal
+            ? Colors.grey.withValues(alpha: 0.05)
+            : Colors.white.withValues(alpha: 0.1),
         contentPadding: const EdgeInsets.symmetric(
           horizontal: 20,
           vertical: 18,
         ),
         suffixIcon: IconButton(
-          icon: Icon(icon, color: Colors.white.withValues(alpha: 0.5)),
+          icon: Icon(
+            icon,
+            color: isModal
+                ? Colors.grey[600]
+                : Colors.white.withValues(alpha: 0.5),
+          ),
           onPressed: onIconPressed,
         ),
         enabledBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(15),
-          borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.2)),
+          borderSide: BorderSide(
+            color: isModal
+                ? Colors.grey.withValues(alpha: 0.2)
+                : Colors.white.withValues(alpha: 0.2),
+          ),
         ),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(15),
-          borderSide: const BorderSide(color: Colors.cyanAccent, width: 2),
+          borderSide: const BorderSide(color: AppColors.secondary, width: 2),
         ),
       ),
     );
