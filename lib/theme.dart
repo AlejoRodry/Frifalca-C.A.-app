@@ -186,6 +186,19 @@ class AppTheme {
         elevation: 4,
         shape: CircleBorder(),
       ),
+
+      // SnackBar personalizado para máxima visibilidad (Prioridad)
+      snackBarTheme: SnackBarThemeData(
+        behavior: SnackBarBehavior.floating,
+        backgroundColor: AppColors.primary,
+        contentTextStyle: GoogleFonts.inter(
+          color: Colors.white,
+          fontSize: 14,
+          fontWeight: FontWeight.w600,
+        ),
+        elevation: 10,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      ),
     );
   }
 
@@ -321,6 +334,19 @@ class AppTheme {
         foregroundColor: Colors.white,
         elevation: 4,
         shape: CircleBorder(),
+      ),
+
+      // SnackBar personalizado para máxima visibilidad (Prioridad)
+      snackBarTheme: SnackBarThemeData(
+        behavior: SnackBarBehavior.floating,
+        backgroundColor: AppColors.secondary,
+        contentTextStyle: GoogleFonts.inter(
+          color: AppColors.primary,
+          fontSize: 14,
+          fontWeight: FontWeight.w600,
+        ),
+        elevation: 12,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       ),
     );
   }

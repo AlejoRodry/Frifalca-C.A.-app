@@ -39,6 +39,10 @@ class DatabaseService {
   Future<void> _registrarEvento({
     required String accion,
     required String detalle,
+    String? motivo,
+    String? tipoMovimiento,
+    String? productoId,
+    int? cantidad,
   }) async {
     try {
       final user = FirebaseAuth.instance.currentUser;
@@ -48,6 +52,10 @@ class DatabaseService {
         'nombre_usuario': user?.displayName ?? 'Usuario',
         'fecha': FieldValue.serverTimestamp(),
         'detalle': detalle,
+        'motivo': motivo ?? 'No especificado',
+        'tipo_movimiento': tipoMovimiento,
+        'producto_id': productoId,
+        'cantidad': cantidad,
         'ultima_modificacion': FieldValue.serverTimestamp(),
       });
     } catch (e) {
@@ -56,7 +64,7 @@ class DatabaseService {
   }
 
   // --- BITÁCORA (Lectura Protegida) ---
-  Stream<QuerySnapshot> streamBitacora({
+  Stream<List<QueryDocumentSnapshot>> streamBitacora({
     String? filtroNombre,
     String? filtroCorreo,
     String? filtroAccion,
@@ -91,29 +99,49 @@ class DatabaseService {
             return const Stream.empty();
           }
 
-          // Construcción de la consulta con filtros compuestos solicitados
-          Query query = _db
+          // Consulta base optimizada por fecha.
+          // El filtrado de texto se hará localmente para permitir case-insensitive (toLowerCase)
+          // y evitar errores de 'indices compuestos' en NoSQL si no están creados.
+          return _db
               .collection('Bitacora')
-              .orderBy('fecha', descending: true);
+              .orderBy('fecha', descending: true)
+              .snapshots();
+        })
+        .map((snapshot) {
+          List<QueryDocumentSnapshot> docs = snapshot.docs;
 
           if (filtroNombre != null && filtroNombre.isNotEmpty) {
-            query = _db
-                .collection('Bitacora')
-                .where('nombre_usuario', isEqualTo: filtroNombre)
-                .orderBy('fecha', descending: true);
-          } else if (filtroCorreo != null && filtroCorreo.isNotEmpty) {
-            query = _db
-                .collection('Bitacora')
-                .where('usuario', isEqualTo: filtroCorreo)
-                .orderBy('fecha', descending: true);
-          } else if (filtroAccion != null && filtroAccion.isNotEmpty) {
-            query = _db
-                .collection('Bitacora')
-                .where('accion', isEqualTo: filtroAccion)
-                .orderBy('fecha', descending: true);
+            final f = filtroNombre.toLowerCase();
+            docs = docs.where((doc) {
+              final val =
+                  (doc.data() as Map)['nombre_usuario']
+                      ?.toString()
+                      .toLowerCase() ??
+                  '';
+              return val.contains(f);
+            }).toList();
           }
 
-          return query.snapshots();
+          if (filtroCorreo != null && filtroCorreo.isNotEmpty) {
+            final f = filtroCorreo.toLowerCase();
+            docs = docs.where((doc) {
+              final val =
+                  (doc.data() as Map)['usuario']?.toString().toLowerCase() ??
+                  '';
+              return val.contains(f);
+            }).toList();
+          }
+
+          if (filtroAccion != null && filtroAccion.isNotEmpty) {
+            final f = filtroAccion.toLowerCase();
+            docs = docs.where((doc) {
+              final val =
+                  (doc.data() as Map)['accion']?.toString().toLowerCase() ?? '';
+              return val.contains(f);
+            }).toList();
+          }
+
+          return docs;
         });
   }
 
@@ -264,6 +292,14 @@ class DatabaseService {
     );
   }
 
+  Future<Pedido?> getPedidoById(String id) async {
+    final doc = await _db.collection('Pedidos').doc(id).get();
+    if (doc.exists) {
+      return Pedido.fromFirestore(doc);
+    }
+    return null;
+  }
+
   // Nueva lógica para cancelar pedidos
   Future<void> cancelarPedido(
     String idDoc, {
@@ -343,6 +379,31 @@ class DatabaseService {
     int? cantBolsa,
   }) async {
     try {
+      // VALIDACIÓN DE STOCK: Verificar stock suficiente antes de despachar
+      if (cantSaco != null && cantSaco > 0) {
+        const idProdSaco = "NZAtCFwTfLTwb3xiiOUk";
+        final snapSaco = await _db.collection('Productos').doc(idProdSaco).get();
+        if (snapSaco.exists) {
+          final data = snapSaco.data() as Map?;
+          int stockFisico = (data?['stock_fisico'] as num? ?? 0).toInt();
+          if (stockFisico < cantSaco) {
+            throw Exception("Stock insuficiente para realizar la operación. Stock disponible de sacos: $stockFisico");
+          }
+        }
+      }
+
+      if (cantBolsa != null && cantBolsa > 0) {
+        const idProdBolsa = "DWDbVnRf5nqGu8uTu3KA";
+        final snapBolsa = await _db.collection('Productos').doc(idProdBolsa).get();
+        if (snapBolsa.exists) {
+          final data = snapBolsa.data() as Map?;
+          int stockFisico = (data?['stock_fisico'] as num? ?? 0).toInt();
+          if (stockFisico < cantBolsa) {
+            throw Exception("Stock insuficiente para realizar la operación. Stock disponible de bolsas: $stockFisico");
+          }
+        }
+      }
+
       final batch = _db.batch();
       debugPrint(
         "DEBUG: Intentando despachar pedido $idDoc por $nombreDespachador",
@@ -441,11 +502,12 @@ class DatabaseService {
   Future<void> ajustarStock(
     String idDoc,
     int cambio,
-    String nombreUsuario,
-  ) async {
+    String nombreUsuario, {
+    String motivo = 'No especificado',
+  }) async {
     try {
       debugPrint(
-        "DEBUG: Ajustando stock de $idDoc con cambio: $cambio por $nombreUsuario",
+        "DEBUG: Ajustando stock de $idDoc con cambio: $cambio por $nombreUsuario | Motivo: $motivo",
       );
 
       // Verificación previa e inicialización
@@ -463,6 +525,15 @@ class DatabaseService {
         });
       }
 
+      // VALIDACIÓN DE STOCK: Si el cambio es negativo, verificar que haya stock suficiente
+      if (cambio < 0) {
+        final data = snap.data() as Map?;
+        int stockFisico = (data?['stock_fisico'] as num? ?? 0).toInt();
+        if (stockFisico < -cambio) {
+          throw Exception("Stock insuficiente para realizar la operación. Stock disponible: $stockFisico");
+        }
+      }
+
       // 1. Actualizar el stock físico (Usando .set con merge para robustez en Web)
       debugPrint("Intentando escribir en Productos ($idDoc)...");
       await _db.collection('Productos').doc(idDoc).set({
@@ -471,13 +542,31 @@ class DatabaseService {
       }, SetOptions(merge: true));
       debugPrint("¡Éxito en la actualización de stock!");
 
-      // 2. Registrar en historial
+      // Determinar tipo de movimiento y nombre del producto
+      String tipoMovimiento = cambio >= 0 ? 'ENTRADA' : 'SALIDA';
+      String nombreProducto = idDoc == "NZAtCFwTfLTwb3xiiOUk" ? "SACO" : "BOLSA";
+      int cantidadAbsoluta = cambio.abs();
+
+      // 2. Registrar en Bitácora con motivo
+      await _registrarEvento(
+        accion: 'AJUSTE_INVENTARIO',
+        detalle:
+            'Se ${cambio >= 0 ? "sumaron" : "restaron"} $cantidadAbsoluta $nombreProducto por [Motivo: $motivo] por el usuario $nombreUsuario',
+        motivo: motivo,
+        tipoMovimiento: tipoMovimiento,
+        productoId: idDoc,
+        cantidad: cambio,
+      );
+
+      // 3. Registrar en Historial_Inventario con motivo
       await _db.collection('Historial_Inventario').add({
         'producto_id': idDoc,
         'cantidad_añadida': cambio,
         'usuario': nombreUsuario,
         'fecha': FieldValue.serverTimestamp(),
         'tipo': 'Carga de Inventario',
+        'motivo': motivo,
+        'tipo_movimiento': tipoMovimiento,
         'ultima_modificacion': FieldValue.serverTimestamp(),
       });
     } catch (e, stack) {
@@ -540,6 +629,9 @@ class DatabaseService {
     required String ticket,
     required Map<String, int> productosYCantidades, // Mapa para mixtos
     required String nombreCreador,
+    String? orden,
+    String? detalleSaco,
+    String? detalleBolsa,
     String? idCliente,
   }) async {
     try {
@@ -591,6 +683,9 @@ class DatabaseService {
           'categoria': categoriaHielo,
           'cantidad_saco': productosYCantidades["NZAtCFwTfLTwb3xiiOUk"] ?? 0,
           'cantidad_bolsa': productosYCantidades["DWDbVnRf5nqGu8uTu3KA"] ?? 0,
+          'orden': orden,
+          'detalle_saco': detalleSaco,
+          'detalle_bolsa': detalleBolsa,
         },
         'Monto_total': monto,
         'N_ticket': ticket,
@@ -645,7 +740,22 @@ class DatabaseService {
     }
   }
 
+  Stream<List<Cita>> obtenerCitas() {
+    return _db
+        .collection('Citas')
+        .orderBy('fecha', descending: true)
+        .snapshots()
+        .map(
+          (snapshot) =>
+              snapshot.docs.map((doc) => Cita.fromFirestore(doc)).toList(),
+        );
+  }
+
   Stream<List<Cita>> streamCitas(DateTime fecha) {
+    return streamCitasDelDia(fecha);
+  }
+
+  Stream<List<Cita>> streamCitasDelDia(DateTime fecha) {
     // Filtrar por el día seleccionado (comienzo a fin)
     final inicio = DateTime(fecha.year, fecha.month, fecha.day);
     final fin = inicio.add(const Duration(days: 1));
@@ -662,6 +772,22 @@ class DatabaseService {
         );
   }
 
+  Future<void> agendarCita(Cita cita) async {
+    await _db.collection('Citas').add({
+      'nombre': cita.nombre,
+      'motivo': cita.motivo,
+      'fecha': Timestamp.fromDate(cita.fecha),
+      'slot': cita.slot,
+      'id_pedido': cita.idPedido,
+      'id_cliente': cita.idCliente,
+      'nombre_cliente': cita.nombreCliente,
+      'color_etiqueta': cita.colorEtiqueta,
+      'estado_agendado': cita.estadoAgendado,
+      'creado_en': FieldValue.serverTimestamp(),
+      'ultima_modificacion': FieldValue.serverTimestamp(),
+    });
+  }
+
   Future<void> crearCita({
     required String nombre,
     required String motivo,
@@ -673,19 +799,24 @@ class DatabaseService {
     String colorEtiqueta = "#FFA500",
     bool estadoAgendado = false,
   }) async {
-    await _db.collection('Citas').add({
-      'nombre': nombre,
-      'motivo': motivo,
-      'fecha': Timestamp.fromDate(fecha),
-      'slot': slot,
-      'id_pedido': idPedido,
-      'id_cliente': idCliente,
-      'nombre_cliente': nombreCliente,
-      'color_etiqueta': colorEtiqueta,
-      'estado_agendado': estadoAgendado,
-      'creado_en': FieldValue.serverTimestamp(),
-      'ultima_modificacion': FieldValue.serverTimestamp(),
-    });
+    await agendarCita(
+      Cita(
+        id: '',
+        nombre: nombre,
+        motivo: motivo,
+        fecha: fecha,
+        slot: slot,
+        idPedido: idPedido,
+        idCliente: idCliente,
+        nombreCliente: nombreCliente,
+        colorEtiqueta: colorEtiqueta,
+        estadoAgendado: estadoAgendado,
+      ),
+    );
+  }
+
+  Future<void> cancelarCita(String idCita) async {
+    await _db.collection('Citas').doc(idCita).delete();
   }
 
   Future<void> actualizarEstadoAgendado(String idCita, bool completado) async {
@@ -721,6 +852,9 @@ class DatabaseService {
     required Map<String, int> productosYCantidades,
     required String nombreCreador,
     required Map<String, int> cantPrevia, // Para ajustar stockComprometido
+    String? orden,
+    String? detalleSaco,
+    String? detalleBolsa,
     String? idCliente,
   }) async {
     try {
@@ -747,6 +881,9 @@ class DatabaseService {
             productosYCantidades["NZAtCFwTfLTwb3xiiOUk"] ?? 0,
         'tipo_hielo.cantidad_bolsa':
             productosYCantidades["DWDbVnRf5nqGu8uTu3KA"] ?? 0,
+        'tipo_hielo.orden': orden,
+        'tipo_hielo.detalle_saco': detalleSaco,
+        'tipo_hielo.detalle_bolsa': detalleBolsa,
         'Monto_total': monto,
         'N_ticket': ticket,
         'creado_por': nombreCreador,
@@ -764,5 +901,58 @@ class DatabaseService {
       debugPrint("Error al actualizar pedido: $e");
       rethrow;
     }
+  }
+
+  Stream<List<Pedido>> getVentasSemanales() {
+    final DateTime sieteDiasAtras = DateTime.now().subtract(
+      const Duration(days: 7),
+    );
+    return _db
+        .collection('Pedidos')
+        .where('estado', isEqualTo: 'Despachado')
+        .where(
+          'fecha',
+          isGreaterThanOrEqualTo: Timestamp.fromDate(sieteDiasAtras),
+        )
+        .orderBy('fecha', descending: true)
+        .snapshots()
+        .map(
+          (snapshot) =>
+              snapshot.docs.map((doc) => Pedido.fromFirestore(doc)).toList(),
+        );
+  }
+
+  Stream<List<Pedido>> streamVentasFiltradas(String filtro) {
+    DateTime now = DateTime.now();
+    DateTime inicio;
+
+    switch (filtro) {
+      case 'Día':
+        inicio = DateTime(now.year, now.month, now.day);
+        break;
+      case 'Semana':
+        inicio = now.subtract(Duration(days: now.weekday - 1));
+        inicio = DateTime(inicio.year, inicio.month, inicio.day);
+        break;
+      case 'Mes':
+        inicio = DateTime(now.year, now.month, 1);
+        break;
+      case 'Año':
+        inicio = DateTime(now.year, 1, 1);
+        break;
+      default:
+        inicio = now.subtract(const Duration(days: 7));
+    }
+
+    return _db
+        .collection('Pedidos')
+        .where('estado', isEqualTo: 'Despachado')
+        .where('fecha', isGreaterThanOrEqualTo: Timestamp.fromDate(inicio))
+        .orderBy('fecha', descending: true)
+        .snapshots()
+        .map(
+          (snapshot) =>
+              snapshot.docs.map((doc) => Pedido.fromFirestore(doc)).toList(),
+        );
   }
 }

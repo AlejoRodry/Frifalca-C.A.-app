@@ -337,6 +337,8 @@ class _Login extends State<Login> {
     debugPrint("Botón presionado. Usuario: ${_emailController.text}");
     final messenger = ScaffoldMessenger.of(context);
     String input = _emailController.text.trim();
+    if (input.contains('@')) input = input.toLowerCase();
+
     String password = _passwordController.text.trim();
 
     if (input.isEmpty || password.isEmpty) {
@@ -470,7 +472,7 @@ class _Login extends State<Login> {
                   sacoComp: sacoComp,
                   bolsaFisico: bolsaFisico,
                   bolsaComp: bolsaComp,
-                  onAjustar: (id, cantidad) {},
+                  onAjustar: (context, id, cantidad, motivo) {},
                   readOnly: true,
                 );
               },
@@ -545,6 +547,21 @@ class _Login extends State<Login> {
                   isPassword: true,
                   isModal: true,
                 ),
+                const SizedBox(height: 15),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: GestureDetector(
+                    onTap: _mostrarDialogoRecuperacion,
+                    child: const Text(
+                      "¿Olvidaste tu contraseña?",
+                      style: TextStyle(
+                        color: AppColors.secondary,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ),
+                ),
                 const SizedBox(height: 30),
                 ElevatedButton(
                   style: ElevatedButton.styleFrom(
@@ -603,6 +620,122 @@ class _Login extends State<Login> {
     );
   }
 
+  void _mostrarDialogoRecuperacion() {
+    final TextEditingController recoveryEmailController =
+        TextEditingController();
+    final bool isDark = Theme.of(context).brightness == Brightness.dark;
+
+    showDialog(
+      context: context,
+      builder: (context) => BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
+        child: AlertDialog(
+          backgroundColor: isDark
+              ? Colors.white.withValues(alpha: 0.1)
+              : Colors.white.withValues(alpha: 0.9),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(30),
+            side: BorderSide(
+              color: isDark
+                  ? Colors.white.withValues(alpha: 0.2)
+                  : Colors.blueGrey.withValues(alpha: 0.1),
+            ),
+          ),
+          title: Text(
+            "Recuperar Contraseña",
+            style: TextStyle(color: isDark ? Colors.white : Colors.black87),
+            textAlign: TextAlign.center,
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                "Ingresa tu correo electrónico para recibir un enlace de restablecimiento.",
+                style: TextStyle(
+                  color: isDark ? Colors.white70 : Colors.black54,
+                  fontSize: 13,
+                ),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 25),
+              _buildTextField(
+                controller: recoveryEmailController,
+                hint: "ejemplo@correo.com",
+                icon: Icons.email_outlined,
+                isModal: true,
+                isDark: isDark,
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text(
+                "Cancelar",
+                style: TextStyle(color: Colors.grey),
+              ),
+            ),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppColors.secondary,
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+              onPressed: () async {
+                final email = recoveryEmailController.text.trim();
+                if (email.isEmpty || !email.contains('@')) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text("Ingresa un correo válido"),
+                      backgroundColor: Colors.orange,
+                    ),
+                  );
+                  return;
+                }
+
+                try {
+                  await FirebaseAuth.instance.sendPasswordResetEmail(
+                    email: email,
+                  );
+                  if (context.mounted) {
+                    Navigator.pop(context);
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text("Enlace enviado. Revisa tu correo."),
+                        backgroundColor: Colors.green,
+                      ),
+                    );
+                  }
+                } on FirebaseAuthException catch (e) {
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(_traducirError(e.code)),
+                        backgroundColor: Colors.red,
+                      ),
+                    );
+                  }
+                } catch (e) {
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text("Error: $e"),
+                        backgroundColor: Colors.red,
+                      ),
+                    );
+                  }
+                }
+              },
+              child: const Text("Enviar enlace"),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     bool isDark = Theme.of(context).brightness == Brightness.dark;
@@ -619,12 +752,14 @@ class _Login extends State<Login> {
               icon: Container(
                 padding: const EdgeInsets.all(8),
                 decoration: BoxDecoration(
-                  color: Colors.white.withValues(alpha: 0.1),
+                  color: isDark
+                      ? Colors.white.withValues(alpha: 0.1)
+                      : Colors.black.withValues(alpha: 0.05),
                   shape: BoxShape.circle,
                 ),
                 child: Icon(
                   isDark ? Icons.light_mode : Icons.dark_mode,
-                  color: Colors.white,
+                  color: isDark ? Colors.white : Colors.black87,
                 ),
               ),
               onPressed: widget.onToggleTheme,
@@ -641,12 +776,15 @@ class _Login extends State<Login> {
             end: Alignment.bottomCenter,
             colors: isDark
                 ? [const Color(0xFF05121F), AppColors.primary]
-                : [AppColors.primary, const Color(0xFF0E3D6B)],
+                : [const Color(0xFFE3F2FD), Colors.white],
           ),
         ),
         child: SafeArea(
           child: SingleChildScrollView(
-            padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 20),
+            padding: EdgeInsets.symmetric(
+              horizontal: MediaQuery.of(context).size.width > 600 ? 30 : 16,
+              vertical: 20,
+            ),
             child: Column(
               children: [
                 const SizedBox(height: 20),
@@ -664,15 +802,21 @@ class _Login extends State<Login> {
                     width: double.infinity,
                     padding: const EdgeInsets.all(35),
                     decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: 0.1),
+                      color: isDark
+                          ? Colors.white.withValues(alpha: 0.1)
+                          : Colors.white.withValues(alpha: 0.9),
                       borderRadius: BorderRadius.circular(40),
                       border: Border.all(
-                        color: Colors.white.withValues(alpha: 0.2),
+                        color: isDark
+                            ? Colors.white.withValues(alpha: 0.2)
+                            : Colors.blueGrey.withValues(alpha: 0.1),
                         width: 1,
                       ),
                       boxShadow: [
                         BoxShadow(
-                          color: Colors.black.withValues(alpha: 0.2),
+                          color: isDark
+                              ? Colors.black.withValues(alpha: 0.2)
+                              : Colors.blueGrey.withValues(alpha: 0.1),
                           blurRadius: 30,
                           offset: const Offset(0, 10),
                         ),
@@ -685,7 +829,10 @@ class _Login extends State<Login> {
                               ? "¡Hola, $_usuarioRecordado!"
                               : "Iniciar Sesión",
                           style: Theme.of(context).textTheme.displayLarge
-                              ?.copyWith(color: Colors.white, fontSize: 24),
+                              ?.copyWith(
+                                color: isDark ? Colors.white : Colors.black87,
+                                fontSize: 24,
+                              ),
                         ),
                         const SizedBox(height: 10),
                         Container(
@@ -702,17 +849,18 @@ class _Login extends State<Login> {
                         if (kIsWeb) ...[
                           // WEB: Todo directo en pantalla
                           if (_usuarioRecordado == null) ...[
-                            _buildLabel("CORREO/USUARIO"),
-                            const SizedBox(height: 10),
+                            _buildLabel("CORREO/USUARIO", isDark: isDark),
+                            const SizedBox(height: 15),
                             _buildTextField(
                               controller: _emailController,
                               hint: "ejemplo@correo.com",
                               icon: Icons.email_outlined,
+                              isDark: isDark,
                             ),
                             const SizedBox(height: 25),
                           ],
-                          _buildLabel("CONTRASEÑA"),
-                          const SizedBox(height: 10),
+                          _buildLabel("CONTRASEÑA", isDark: isDark),
+                          const SizedBox(height: 15),
                           _buildTextField(
                             controller: _passwordController,
                             hint: "****",
@@ -724,13 +872,29 @@ class _Login extends State<Login> {
                               () => _oscurecerPassword = !_oscurecerPassword,
                             ),
                             isPassword: true,
+                            isDark: isDark,
+                          ),
+                          const SizedBox(height: 15),
+                          Align(
+                            alignment: Alignment.centerRight,
+                            child: GestureDetector(
+                              onTap: _mostrarDialogoRecuperacion,
+                              child: const Text(
+                                "¿Olvidaste tu contraseña?",
+                                style: TextStyle(
+                                  color: AppColors.secondary,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            ),
                           ),
                           if (_usuarioRecordado == null) ...[
                             SwitchListTile(
-                              title: const Text(
+                              title: Text(
                                 "Mantener la sesión",
                                 style: TextStyle(
-                                  color: Colors.white,
+                                  color: isDark ? Colors.white : Colors.black87,
                                   fontSize: 13,
                                 ),
                               ),
@@ -774,7 +938,9 @@ class _Login extends State<Login> {
                                 "Ver Inventario General (Público)",
                               ),
                               style: TextButton.styleFrom(
-                                foregroundColor: Colors.white70,
+                                foregroundColor: isDark
+                                    ? Colors.white70
+                                    : Colors.black54,
                               ),
                             ),
                           ],
@@ -785,7 +951,10 @@ class _Login extends State<Login> {
                               label: "Usar Huella Digital",
                               icon: Icons.fingerprint_rounded,
                               onPressed: _autenticarConHuella,
-                              color: Colors.white.withValues(alpha: 0.1),
+                              color: isDark
+                                  ? Colors.white.withValues(alpha: 0.1)
+                                  : Colors.blueGrey.withValues(alpha: 0.1),
+                              textColor: isDark ? Colors.white : Colors.black87,
                             ),
                             const SizedBox(height: 20),
                             TextButton.icon(
@@ -798,13 +967,17 @@ class _Login extends State<Login> {
                                 "Ver Inventario General (Público)",
                               ),
                               style: TextButton.styleFrom(
-                                foregroundColor: Colors.white70,
+                                foregroundColor: isDark
+                                    ? Colors.white70
+                                    : Colors.black54,
                               ),
                             ),
                           ] else
-                            const Text(
+                            Text(
                               "Bienvenido a Frifalca",
-                              style: TextStyle(color: Colors.white70),
+                              style: TextStyle(
+                                color: isDark ? Colors.white70 : Colors.black54,
+                              ),
                             ),
                           const SizedBox(height: 20),
                           _buildAuthButton(
@@ -813,6 +986,7 @@ class _Login extends State<Login> {
                             onPressed: _mostrarModalContrasena,
                             color: AppColors.secondary,
                             isPrimary: true,
+                            textColor: Colors.white,
                           ),
                         ],
                         // --- Error Message ---
@@ -876,10 +1050,10 @@ class _Login extends State<Login> {
                               ),
                             );
                           },
-                          child: const Text(
+                          child: Text(
                             "¿Fuiste pre-autorizado? Registrate aquí",
                             style: TextStyle(
-                              color: Colors.white70,
+                              color: isDark ? Colors.white70 : Colors.black54,
                               fontSize: 13,
                             ),
                           ),
@@ -904,6 +1078,7 @@ class _Login extends State<Login> {
     required VoidCallback onPressed,
     required Color color,
     bool isPrimary = false,
+    Color textColor = Colors.white,
   }) {
     return Container(
       width: double.infinity,
@@ -914,7 +1089,7 @@ class _Login extends State<Login> {
         label: Text(label),
         style: ElevatedButton.styleFrom(
           backgroundColor: color,
-          foregroundColor: Colors.white,
+          foregroundColor: textColor,
           padding: const EdgeInsets.symmetric(vertical: 18),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(15),
@@ -925,13 +1100,15 @@ class _Login extends State<Login> {
     );
   }
 
-  Widget _buildLabel(String text, {bool isModal = false}) {
+  Widget _buildLabel(String text, {bool isModal = false, bool isDark = true}) {
     return Align(
       alignment: Alignment.centerLeft,
       child: Text(
         text,
         style: TextStyle(
-          color: isModal ? Colors.grey[700] : Colors.white70,
+          color: isModal
+              ? Colors.grey[700]
+              : (isDark ? Colors.white70 : Colors.black54),
           fontSize: 11,
           fontWeight: FontWeight.bold,
           letterSpacing: 1.2,
@@ -948,20 +1125,23 @@ class _Login extends State<Login> {
     VoidCallback? onIconPressed,
     bool isPassword = false,
     bool isModal = false,
+    bool isDark = true,
   }) {
     return TextField(
       controller: controller,
       obscureText: obscure,
-      style: TextStyle(color: isModal ? Colors.black87 : Colors.white),
+      style: TextStyle(
+        color: isModal || !isDark ? Colors.black87 : Colors.white,
+      ),
       decoration: InputDecoration(
         hintText: hint,
         hintStyle: TextStyle(
-          color: isModal
+          color: isModal || !isDark
               ? Colors.grey.withValues(alpha: 0.5)
               : Colors.white.withValues(alpha: 0.4),
         ),
         filled: true,
-        fillColor: isModal
+        fillColor: isModal || !isDark
             ? Colors.grey.withValues(alpha: 0.05)
             : Colors.white.withValues(alpha: 0.1),
         contentPadding: const EdgeInsets.symmetric(
@@ -971,7 +1151,7 @@ class _Login extends State<Login> {
         suffixIcon: IconButton(
           icon: Icon(
             icon,
-            color: isModal
+            color: isModal || !isDark
                 ? Colors.grey[600]
                 : Colors.white.withValues(alpha: 0.5),
           ),
@@ -980,7 +1160,7 @@ class _Login extends State<Login> {
         enabledBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(15),
           borderSide: BorderSide(
-            color: isModal
+            color: isModal || !isDark
                 ? Colors.grey.withValues(alpha: 0.2)
                 : Colors.white.withValues(alpha: 0.2),
           ),

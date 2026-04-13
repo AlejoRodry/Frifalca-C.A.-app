@@ -15,11 +15,11 @@ class RegistroTrabajadorScreen extends StatefulWidget {
 class _RegistroTrabajadorScreenState extends State<RegistroTrabajadorScreen> {
   final _nombreController = TextEditingController();
   final _apellidoController = TextEditingController();
-  final _cedulaController = TextEditingController();
+  final _usuarioController = TextEditingController();
   final _emailController = TextEditingController();
   final _rolController = TextEditingController();
-  final _statusController = TextEditingController();
   final _passwordController = TextEditingController();
+  final _confirmPasswordController = TextEditingController();
   final _formKey = GlobalKey<FormState>();
 
   bool _isLoading = false;
@@ -57,8 +57,6 @@ class _RegistroTrabajadorScreenState extends State<RegistroTrabajadorScreen> {
         _nombreController.text = data['nombre'] ?? '';
         _apellidoController.text = data['apellido'] ?? '';
         _rolController.text = data['rol'] ?? 'trabajador';
-        _cedulaController.text = data['cedula'] ?? '';
-        _statusController.text = 'active'; // Status por defecto al registrarse
         _emailValidado = true;
         _isLoading = false;
       });
@@ -70,6 +68,11 @@ class _RegistroTrabajadorScreenState extends State<RegistroTrabajadorScreen> {
 
   Future<void> _registrarTrabajador() async {
     if (!_formKey.currentState!.validate()) return;
+
+    if (_passwordController.text != _confirmPasswordController.text) {
+      _mostrarError("Las contraseñas no coinciden.");
+      return;
+    }
 
     setState(() => _isLoading = true);
 
@@ -85,21 +88,32 @@ class _RegistroTrabajadorScreenState extends State<RegistroTrabajadorScreen> {
 
       final uid = userCredential.user!.uid;
 
-      // 2. Crear documento en pre_autorizacion_usuarios con email como ID
-      await FirebaseFirestore.instance
-          .collection('pre_autorizacion_usuarios')
-          .doc(emailNormalized)
-          .set({
-            'nombre': _nombreController.text.trim(),
-            'apellido': _apellidoController.text.trim(),
-            'cedula': _cedulaController.text.trim(),
-            'email': emailNormalized,
-            'rol': _rolController.text.trim(),
-            'status': _statusController.text.trim(),
-            'uid': uid,
-            'ingresado': FieldValue.serverTimestamp(),
-            'ultima_modificacion': FieldValue.serverTimestamp(),
-          });
+      // 2. Crear documento en Trabajadores usando UID como ID (siguiendo el patrón oficial)
+      try {
+        await FirebaseFirestore.instance
+            .collection('Trabajadores')
+            .doc(uid)
+            .set({
+              'nombre': _nombreController.text.trim(),
+              'apellido': _apellidoController.text.trim(),
+              'usuario': _usuarioController.text.trim(),
+              'correo':
+                  emailNormalized, // Email ya normalizado (trim y lowercase)
+              'rol': _rolController.text.trim(),
+              'cargo': 'Personal',
+              'fecha_registro': FieldValue.serverTimestamp(),
+              'completado': true,
+              'uid': uid,
+              'ultima_modificacion': FieldValue.serverTimestamp(),
+            });
+      } catch (e) {
+        // ROLLBACK: Si falla la base de datos, eliminamos el usuario de Auth para evitar cuentas huérfanas
+        await userCredential.user?.delete();
+        debugPrint(
+          "Rollback ejecutado: Usuario de Auth eliminado por error en Firestore.",
+        );
+        rethrow;
+      }
 
       // 3. Actualizar status en PreAutorizaciones (opcional, si existe la colección)
       try {
@@ -115,11 +129,11 @@ class _RegistroTrabajadorScreenState extends State<RegistroTrabajadorScreen> {
         // Limpiar controladores
         _nombreController.clear();
         _apellidoController.clear();
-        _cedulaController.clear();
+        _usuarioController.clear();
         _emailController.clear();
         _rolController.clear();
-        _statusController.clear();
         _passwordController.clear();
+        _confirmPasswordController.clear();
 
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -170,6 +184,13 @@ class _RegistroTrabajadorScreenState extends State<RegistroTrabajadorScreen> {
         title: const Text("Registro de Trabajador"),
         backgroundColor: Colors.transparent,
         elevation: 0,
+        centerTitle: true,
+        iconTheme: IconThemeData(color: isDark ? Colors.white : Colors.black87),
+        titleTextStyle: TextStyle(
+          color: isDark ? Colors.white : Colors.black87,
+          fontSize: 18,
+          fontWeight: FontWeight.bold,
+        ),
       ),
       body: Container(
         width: double.infinity,
@@ -180,13 +201,16 @@ class _RegistroTrabajadorScreenState extends State<RegistroTrabajadorScreen> {
             end: Alignment.bottomCenter,
             colors: isDark
                 ? [const Color(0xFF05121F), AppColors.primary]
-                : [AppColors.primary, const Color(0xFF0E3D6B)],
+                : [const Color(0xFFE3F2FD), Colors.white],
           ),
         ),
         child: SafeArea(
           child: Center(
             child: SingleChildScrollView(
-              padding: const EdgeInsets.all(30),
+              padding: EdgeInsets.symmetric(
+                horizontal: MediaQuery.of(context).size.width > 600 ? 30 : 16,
+                vertical: 30,
+              ),
               child: ConstrainedBox(
                 constraints: const BoxConstraints(maxWidth: 500),
                 child: ClipRRect(
@@ -196,9 +220,15 @@ class _RegistroTrabajadorScreenState extends State<RegistroTrabajadorScreen> {
                     child: Container(
                       padding: const EdgeInsets.all(30),
                       decoration: BoxDecoration(
-                        color: Colors.white.withAlpha(25),
+                        color: isDark
+                            ? Colors.white.withAlpha(25)
+                            : Colors.white.withAlpha(230),
                         borderRadius: BorderRadius.circular(30),
-                        border: Border.all(color: Colors.white.withAlpha(50)),
+                        border: Border.all(
+                          color: isDark
+                              ? Colors.white.withAlpha(50)
+                              : Colors.blueGrey.withAlpha(20),
+                        ),
                       ),
                       child: Form(
                         key: _formKey,
@@ -215,8 +245,8 @@ class _RegistroTrabajadorScreenState extends State<RegistroTrabajadorScreen> {
                               _emailValidado
                                   ? "Completa tu perfil"
                                   : "Verificación",
-                              style: const TextStyle(
-                                color: Colors.white,
+                              style: TextStyle(
+                                color: isDark ? Colors.white : Colors.black87,
                                 fontSize: 22,
                                 fontWeight: FontWeight.bold,
                               ),
@@ -227,8 +257,8 @@ class _RegistroTrabajadorScreenState extends State<RegistroTrabajadorScreen> {
                                   ? "Asigna una contraseña para tu cuenta"
                                   : "Ingresa el correo con el que fuiste autorizado",
                               textAlign: TextAlign.center,
-                              style: const TextStyle(
-                                color: Colors.white70,
+                              style: TextStyle(
+                                color: isDark ? Colors.white70 : Colors.black54,
                                 fontSize: 14,
                               ),
                             ),
@@ -237,10 +267,24 @@ class _RegistroTrabajadorScreenState extends State<RegistroTrabajadorScreen> {
                             // --- PASO 1: VALIDACIÓN DE EMAIL ---
                             if (!_emailValidado) ...[
                               _buildTextField(
+                                controller: _usuarioController,
+                                label: "Nombre de Usuario",
+                                icon: Icons.person_pin_rounded,
+                                isDark: isDark,
+                                validator: (val) {
+                                  if (val == null || val.isEmpty) {
+                                    return "El usuario es obligatorio";
+                                  }
+                                  return null;
+                                },
+                              ),
+                              const SizedBox(height: 20),
+                              _buildTextField(
                                 controller: _emailController,
                                 label: "Correo Autorizado",
                                 icon: Icons.email_outlined,
                                 keyboard: TextInputType.emailAddress,
+                                isDark: isDark,
                               ),
                               const SizedBox(height: 30),
                               _buildButton(
@@ -248,6 +292,7 @@ class _RegistroTrabajadorScreenState extends State<RegistroTrabajadorScreen> {
                                     ? "Verificando..."
                                     : "Verificar Autorización",
                                 onPressed: _isLoading ? null : _validarEmail,
+                                isDark: isDark,
                               ),
                             ],
 
@@ -257,32 +302,42 @@ class _RegistroTrabajadorScreenState extends State<RegistroTrabajadorScreen> {
                                 controller: _nombreController,
                                 label: "Nombre",
                                 icon: Icons.person_outline,
+                                isDark: isDark,
+                                validator: (val) {
+                                  if (val == null || val.isEmpty) {
+                                    return "Este campo es obligatorio";
+                                  }
+                                  return null;
+                                },
                               ),
-                              const SizedBox(height: 15),
+                              const SizedBox(height: 20),
                               _buildTextField(
                                 controller: _apellidoController,
                                 label: "Apellido",
                                 icon: Icons.person_outline,
+                                isDark: isDark,
+                                validator: (val) {
+                                  if (val == null || val.isEmpty) {
+                                    return "Este campo es obligatorio";
+                                  }
+                                  return null;
+                                },
                               ),
-                              const SizedBox(height: 15),
-                              _buildTextField(
-                                controller: _cedulaController,
-                                label: "Cédula",
-                                icon: Icons.badge_outlined,
-                                keyboard: TextInputType.number,
-                              ),
-                              const SizedBox(height: 15),
+                              const SizedBox(height: 20),
                               _buildTextField(
                                 controller: _rolController,
                                 label: "Rol asignado",
                                 icon: Icons.work_outline,
+                                readOnly: true,
+                                isDark: isDark,
+                                validator: (val) {
+                                  if (val == null || val.isEmpty) {
+                                    return "Este campo es obligatorio";
+                                  }
+                                  return null;
+                                },
                               ),
-                              const SizedBox(height: 15),
-                              _buildTextField(
-                                controller: _statusController,
-                                label: "Estado",
-                                icon: Icons.info_outline,
-                              ),
+                              const SizedBox(height: 20),
                               _buildTextField(
                                 controller: _passwordController,
                                 label: "Nueva Contraseña",
@@ -290,12 +345,27 @@ class _RegistroTrabajadorScreenState extends State<RegistroTrabajadorScreen> {
                                     ? Icons.visibility_off
                                     : Icons.visibility,
                                 obscure: _obscurePassword,
+                                isDark: isDark,
                                 onIconPressed: () => setState(
                                   () => _obscurePassword = !_obscurePassword,
                                 ),
                                 validator: (val) {
                                   if (val == null || val.length < 6) {
                                     return "Mínimo 6 caracteres";
+                                  }
+                                  return null;
+                                },
+                              ),
+                              const SizedBox(height: 20),
+                              _buildTextField(
+                                controller: _confirmPasswordController,
+                                label: "Confirmar Contraseña",
+                                icon: Icons.lock_outline,
+                                obscure: _obscurePassword,
+                                isDark: isDark,
+                                validator: (val) {
+                                  if (val != _passwordController.text) {
+                                    return "Las contraseñas no coinciden";
                                   }
                                   return null;
                                 },
@@ -308,14 +378,19 @@ class _RegistroTrabajadorScreenState extends State<RegistroTrabajadorScreen> {
                                 onPressed: _isLoading
                                     ? null
                                     : _registrarTrabajador,
+                                isDark: isDark,
                               ),
                               const SizedBox(height: 15),
                               TextButton(
                                 onPressed: () =>
                                     setState(() => _emailValidado = false),
-                                child: const Text(
+                                child: Text(
                                   "Usar otro correo",
-                                  style: TextStyle(color: Colors.white70),
+                                  style: TextStyle(
+                                    color: isDark
+                                        ? Colors.white70
+                                        : Colors.black54,
+                                  ),
                                 ),
                               ),
                             ],
@@ -341,25 +416,33 @@ class _RegistroTrabajadorScreenState extends State<RegistroTrabajadorScreen> {
     VoidCallback? onIconPressed,
     TextInputType keyboard = TextInputType.text,
     String? Function(String?)? validator,
+    bool readOnly = false,
+    bool isDark = true,
   }) {
     return TextFormField(
       controller: controller,
       obscureText: obscure,
       keyboardType: keyboard,
       validator: validator,
-      style: const TextStyle(color: Colors.white),
+      readOnly: readOnly,
+      style: TextStyle(color: isDark ? Colors.white : Colors.black87),
       decoration: InputDecoration(
         labelText: label,
-        labelStyle: const TextStyle(color: Colors.white70),
+        labelStyle: TextStyle(color: isDark ? Colors.white70 : Colors.black54),
         prefixIcon: Icon(icon, color: AppColors.secondary, size: 20),
         suffixIcon: onIconPressed != null
             ? IconButton(
-                icon: Icon(icon, color: Colors.white38),
+                icon: Icon(
+                  obscure ? Icons.visibility_off : Icons.visibility,
+                  color: isDark ? Colors.white38 : Colors.black26,
+                ),
                 onPressed: onIconPressed,
               )
             : null,
         filled: true,
-        fillColor: Colors.white.withAlpha(20),
+        fillColor: isDark
+            ? Colors.white.withAlpha(20)
+            : Colors.black.withAlpha(10),
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(15),
           borderSide: BorderSide.none,
@@ -371,6 +454,7 @@ class _RegistroTrabajadorScreenState extends State<RegistroTrabajadorScreen> {
   Widget _buildButton({
     required String text,
     required VoidCallback? onPressed,
+    bool isDark = true,
   }) {
     return SizedBox(
       width: double.infinity,

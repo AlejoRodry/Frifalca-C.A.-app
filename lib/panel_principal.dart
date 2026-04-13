@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'theme.dart';
 import 'servicios_de_base_de_datos.dart'; // Aquí está tu DatabaseService original
 import 'package:firebase_auth/firebase_auth.dart';
@@ -8,6 +9,8 @@ import 'componentes_de_inventario.dart'
 import 'modelo_pedidos.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'dart:async';
+import 'ayuda_screen.dart';
+import 'dart:ui';
 
 class PanelPrincipal extends StatefulWidget {
   final VoidCallback onToggleTheme;
@@ -22,29 +25,38 @@ class PanelPrincipal extends StatefulWidget {
   State<PanelPrincipal> createState() => _PanelPrincipalState();
 }
 
-class _PanelPrincipalState extends State<PanelPrincipal> {
+class _PanelPrincipalState extends State<PanelPrincipal>
+    with TickerProviderStateMixin {
   final DatabaseService _dbService = DatabaseService();
+  final ScrollController _scrollController = ScrollController();
   String _filtroTicket = "";
   String _filtroEstado = "Todos";
   DateTime _selectedDate = DateTime.now();
 
   late Stream<QuerySnapshot> _productosStream;
+  late Stream<List<Cita>> _citasStream;
   late Future<DocumentSnapshot?> _userFuture;
+
+  // Claves para validación de formularios
+  final _formKeyPedido = GlobalKey<FormState>();
+  final _formKeyCliente = GlobalKey<FormState>();
+  final _formKeyTrabajador = GlobalKey<FormState>();
 
   // Método de obtención de datos basado exclusivamente en el correo
   Future<DocumentSnapshot?> _obtenerPerfilPorEmail(String email) async {
     try {
+      final cleanEmail = email.trim().toLowerCase();
       // Consulta obligatoria por campo 'correo' ya que los IDs son aleatorios
       final query = await FirebaseFirestore.instance
           .collection('Trabajadores')
-          .where('correo', isEqualTo: email)
+          .where('correo', isEqualTo: cleanEmail)
           .limit(1)
           .get();
 
       if (query.docs.isNotEmpty) return query.docs.first;
       return null;
     } catch (e) {
-      debugPrint("Error crítico en _obtenerPerfilPorEmail: $e");
+      debugPrint("Error crítico en _obtenerPerfilPorEmail: $email - $e");
       return null;
     }
   }
@@ -55,7 +67,8 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
     final userAuth = FirebaseAuth.instance.currentUser;
     // Iniciamos la carga basada en email como llave única
     if (userAuth != null && userAuth.email != null) {
-      _userFuture = _obtenerPerfilPorEmail(userAuth.email!);
+      final String safeEmail = userAuth.email!.trim().toLowerCase();
+      _userFuture = _obtenerPerfilPorEmail(safeEmail);
     } else {
       _userFuture = Future.value(null);
     }
@@ -63,6 +76,13 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
     _productosStream = FirebaseFirestore.instance
         .collection('Productos')
         .snapshots();
+    _citasStream = _dbService.streamCitasDelDia(_selectedDate);
+  }
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
   }
 
   // Ya no usamos variables de estado para el nombre y el rol,
@@ -124,101 +144,118 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
     return LayoutBuilder(
       builder: (context, constraints) {
         final bool isDesktop = constraints.maxWidth >= 800;
-        return DefaultTabController(
-          length: widget.esInvitado ? 1 : 4,
-          child: StreamBuilder<QuerySnapshot>(
-            stream: _productosStream,
-            builder: (context, prodSnap) {
-              // --- Cálculo de Stocks ---
-              int sacoFisico = 0, sacoComp = 0, bolsaFisico = 0, bolsaComp = 0;
-              if (prodSnap.hasData) {
-                for (var doc in prodSnap.data!.docs) {
-                  final data = doc.data() as Map<String, dynamic>;
-                  if (doc.id == "NZAtCFwTfLTwb3xiiOUk") {
-                    sacoFisico = (data['stock_fisico'] as num? ?? 0).toInt();
-                    sacoComp = (data['stock_comprometido'] as num? ?? 0)
-                        .toInt();
-                  }
-                  if (doc.id == "DWDbVnRf5nqGu8uTu3KA") {
-                    bolsaFisico = (data['stock_fisico'] as num? ?? 0).toInt();
-                    bolsaComp = (data['stock_comprometido'] as num? ?? 0)
-                        .toInt();
-                  }
-                }
-              }
+        return Builder(
+          builder: (context) {
+            final int tabLength = widget.esInvitado ? 1 : 4;
+            if (!mounted) return const SizedBox.shrink();
+            // Inicializar controlador si no existe o cambió el tamaño
+            if (!mounted) return const SizedBox.shrink();
 
-              // --- AUDITORÍA DE STOCK ---
-              if (prodSnap.hasData) {
-                debugPrint("--- AUDITORÍA DE INVENTARIO (PanelPrincipal) ---");
-                debugPrint(
-                  "DEBUG: Estado del Stream Productos: ${prodSnap.connectionState}",
-                );
-                debugPrint(
-                  "DEBUG: Cantidad de documentos recibidos: ${prodSnap.data?.docs.length ?? 0}",
-                );
+            return DefaultTabController(
+              length: tabLength,
+              child: StreamBuilder<QuerySnapshot>(
+                stream: _productosStream,
+                builder: (context, prodSnap) {
+                  // --- Cálculo de Stocks ---
+                  int sacoFisico = 0,
+                      sacoComp = 0,
+                      bolsaFisico = 0,
+                      bolsaComp = 0;
+                  if (prodSnap.hasData) {
+                    for (var doc in prodSnap.data!.docs) {
+                      final data = doc.data() as Map<String, dynamic>;
+                      if (doc.id == "NZAtCFwTfLTwb3xiiOUk") {
+                        sacoFisico = (data['stock_fisico'] as num? ?? 0)
+                            .toInt();
+                        sacoComp = (data['stock_comprometido'] as num? ?? 0)
+                            .toInt();
+                      }
+                      if (doc.id == "DWDbVnRf5nqGu8uTu3KA") {
+                        bolsaFisico = (data['stock_fisico'] as num? ?? 0)
+                            .toInt();
+                        bolsaComp = (data['stock_comprometido'] as num? ?? 0)
+                            .toInt();
+                      }
+                    }
+                  }
 
-                if (prodSnap.data!.docs.isNotEmpty) {
-                  debugPrint(
-                    "DEBUG: Ejemplo de primer doc (Productos): ${prodSnap.data?.docs.first.data()}",
-                  );
-                  for (var doc in prodSnap.data!.docs) {
-                    final data = doc.data() as Map<String, dynamic>;
-                    final String nombreProd = doc.id == "NZAtCFwTfLTwb3xiiOUk"
-                        ? "SACO"
-                        : "BOLSA";
-                    final int fisico = (data['stock_fisico'] as num? ?? 0)
-                        .toInt();
-                    final int compField =
-                        (data['stock_comprometido'] as num? ?? 0).toInt();
+                  // --- AUDITORÍA DE STOCK ---
+                  if (prodSnap.hasData) {
                     debugPrint(
-                      "Producto: $nombreProd | Físico Firebase: $fisico | Comprometido Firebase: $compField | Disponible Calc: ${fisico - compField}",
+                      "--- AUDITORÍA DE INVENTARIO (PanelPrincipal) ---",
+                    );
+                    debugPrint(
+                      "DEBUG: Estado del Stream Productos: ${prodSnap.connectionState}",
+                    );
+                    debugPrint(
+                      "DEBUG: Cantidad de documentos recibidos: ${prodSnap.data?.docs.length ?? 0}",
+                    );
+
+                    if (prodSnap.data!.docs.isNotEmpty) {
+                      debugPrint(
+                        "DEBUG: Ejemplo de primer doc (Productos): ${prodSnap.data?.docs.first.data()}",
+                      );
+                      for (var doc in prodSnap.data!.docs) {
+                        final data = doc.data() as Map<String, dynamic>;
+                        final String nombreProd =
+                            doc.id == "NZAtCFwTfLTwb3xiiOUk" ? "SACO" : "BOLSA";
+                        final int fisico = (data['stock_fisico'] as num? ?? 0)
+                            .toInt();
+                        final int compField =
+                            (data['stock_comprometido'] as num? ?? 0).toInt();
+                        debugPrint(
+                          "Producto: $nombreProd | Físico Firebase: $fisico | Comprometido Firebase: $compField | Disponible Calc: ${fisico - compField}",
+                        );
+                      }
+                    } else {
+                      debugPrint(
+                        "DEBUG: No se encontraron documentos en la colección 'Productos'",
+                      );
+                    }
+                    debugPrint(
+                      "-----------------------------------------------",
+                    );
+                  } else if (prodSnap.hasError) {
+                    debugPrint(
+                      "DEBUG: Error en Stream Productos: ${prodSnap.error}",
+                    );
+                  } else {
+                    debugPrint(
+                      "DEBUG: Esperando datos de Productos (Estado: ${prodSnap.connectionState})",
                     );
                   }
-                } else {
-                  debugPrint(
-                    "DEBUG: No se encontraron documentos en la colección 'Productos'",
-                  );
-                }
-                debugPrint("-----------------------------------------------");
-              } else if (prodSnap.hasError) {
-                debugPrint(
-                  "DEBUG: Error en Stream Productos: ${prodSnap.error}",
-                );
-              } else {
-                debugPrint(
-                  "DEBUG: Esperando datos de Productos (Estado: ${prodSnap.connectionState})",
-                );
-              }
 
-              if (isDesktop) {
-                return _EscritorioView(
-                  nombreCompleto: nombreCompleto,
-                  rolActual: rolActual,
-                  userData: userData,
-                  sacoFisico: sacoFisico,
-                  sacoComp: sacoComp,
-                  bolsaFisico: bolsaFisico,
-                  bolsaComp: bolsaComp,
-                  esInvitado: widget.esInvitado,
-                  onToggleTheme: widget.onToggleTheme,
-                  parent: this,
-                );
-              } else {
-                return _MovilView(
-                  nombreCompleto: nombreCompleto,
-                  rolActual: rolActual,
-                  userData: userData,
-                  sacoFisico: sacoFisico,
-                  sacoComp: sacoComp,
-                  bolsaFisico: bolsaFisico,
-                  bolsaComp: bolsaComp,
-                  esInvitado: widget.esInvitado,
-                  onToggleTheme: widget.onToggleTheme,
-                  parent: this,
-                );
-              }
-            },
-          ),
+                  if (isDesktop) {
+                    return _EscritorioView(
+                      nombreCompleto: nombreCompleto,
+                      rolActual: rolActual,
+                      userData: userData,
+                      sacoFisico: sacoFisico,
+                      sacoComp: sacoComp,
+                      bolsaFisico: bolsaFisico,
+                      bolsaComp: bolsaComp,
+                      esInvitado: widget.esInvitado,
+                      onToggleTheme: widget.onToggleTheme,
+                      parent: this,
+                    );
+                  } else {
+                    return _MovilView(
+                      nombreCompleto: nombreCompleto,
+                      rolActual: rolActual,
+                      userData: userData,
+                      sacoFisico: sacoFisico,
+                      sacoComp: sacoComp,
+                      bolsaFisico: bolsaFisico,
+                      bolsaComp: bolsaComp,
+                      esInvitado: widget.esInvitado,
+                      onToggleTheme: widget.onToggleTheme,
+                      parent: this,
+                    );
+                  }
+                },
+              ),
+            );
+          },
         );
       },
     );
@@ -238,144 +275,186 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
   }) {
     final int sacoDisp = (sacoFisico - sacoComp).clamp(0, 999999);
     final int bolsaDisp = (bolsaFisico - bolsaComp).clamp(0, 999999);
-    bool hayAlertaProd = (sacoDisp <= 0 && bolsaDisp <= 0);
-    bool hayAlertaStock = (sacoDisp <= 0 || bolsaDisp <= 0);
-    double totalHeight =
-        (hayAlertaStock ? 320 : 260) + (hayAlertaProd ? 80 : 0);
 
     return Scrollbar(
+      controller: _scrollController,
       thumbVisibility: true,
       trackVisibility: true,
-      child: NestedScrollView(
-        headerSliverBuilder: (context, innerBoxIsScrolled) {
-          return [
-            if (showHeader) ...[
-              SliverToBoxAdapter(
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 25, 20, 15),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Image.asset('assets/frifalca6.png', height: 40),
-                      Text(
-                        "Frifalca C.A.",
-                        style: Theme.of(context).textTheme.headlineMedium
-                            ?.copyWith(
-                              color: AppColors.secondary,
-                              fontWeight: FontWeight.bold,
-                            ),
-                      ),
-                      Row(
-                        children: [
-                          _buildHeaderButton(
-                            icon:
-                                Theme.of(context).brightness == Brightness.dark
-                                ? Icons.light_mode
-                                : Icons.dark_mode,
-                            color:
-                                Theme.of(context).brightness == Brightness.dark
-                                ? Colors.yellow
-                                : AppColors.primary,
-                            onPressed: widget.onToggleTheme,
+      thickness: 8.0,
+      radius: const Radius.circular(10),
+      child: CustomScrollView(
+        controller: _scrollController,
+        physics: const BouncingScrollPhysics(),
+        slivers: [
+          if (showHeader) ...[
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(20, 25, 20, 15),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Image.asset('assets/frifalca6.png', height: 40),
+                    Text(
+                      "Frifalca C.A.",
+                      style: Theme.of(context).textTheme.headlineMedium
+                          ?.copyWith(
+                            color: AppColors.secondary,
+                            fontWeight: FontWeight.bold,
                           ),
-                          _buildHeaderButton(
-                            icon: Icons.logout_rounded,
-                            color: AppColors.error,
-                            onPressed: () =>
-                                _mostrarConfirmacionLogout(context),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-              SliverToBoxAdapter(
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 20),
-                  child: _buildGreetingCard(nombreCompleto),
-                ),
-              ),
-              const SliverToBoxAdapter(child: SizedBox(height: 25)),
-            ],
-            SliverPersistentHeader(
-              pinned: true,
-              delegate: _SliverAppBarDelegate(
-                minHeight: totalHeight,
-                maxHeight: totalHeight,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 20),
-                  color: Theme.of(context).scaffoldBackgroundColor,
-                  child: Column(
-                    children: [
-                      if (hayAlertaProd) _buildAlertaProduccion(),
-                      comp.InventarioResumenCard(
-                        sacoFisico: sacoFisico,
-                        sacoComp: sacoComp,
-                        bolsaFisico: bolsaFisico,
-                        bolsaComp: bolsaComp,
-                        readOnly: widget.esInvitado,
-                        onAjustar: (id, cantidad) => _procesarAjusteInventario(
-                          id,
-                          cantidad,
-                          nombreCompleto,
+                    ),
+                    Row(
+                      children: [
+                        _buildHeaderButton(
+                          icon: Theme.of(context).brightness == Brightness.dark
+                              ? Icons.light_mode
+                              : Icons.dark_mode,
+                          color: Theme.of(context).brightness == Brightness.dark
+                              ? Colors.yellow
+                              : AppColors.primary,
+                          onPressed: widget.onToggleTheme,
                         ),
-                      ),
-                      const SizedBox(height: 20),
-                    ],
-                  ),
+                        _buildHeaderButton(
+                          icon: Icons.logout_rounded,
+                          color: AppColors.error,
+                          onPressed: () => _mostrarConfirmacionLogout(context),
+                        ),
+                      ],
+                    ),
+                  ],
                 ),
               ),
             ),
-          ];
-        },
-        body: TabBarView(
-          physics: widget.esInvitado
-              ? const NeverScrollableScrollPhysics()
-              : null,
-          children: [
-            _buildInventarioTabContent(
-              sacoDisp,
-              bolsaDisp,
-              nombreCompleto,
-              rolActual,
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                child: _buildGreetingCard(nombreCompleto),
+              ),
             ),
-            if (!widget.esInvitado) ...[
-              _buildPedidosTab(rolActual, nombreCompleto),
-              _buildCitasTab(),
-              _buildConfiguracionesTab(rolActual, userData),
-            ],
           ],
-        ),
+
+          SliverPersistentHeader(
+            pinned: true,
+            delegate: _DynamicInventoryHeaderDelegate(
+              sacoFisico: sacoFisico,
+              sacoComp: sacoComp,
+              bolsaFisico: bolsaFisico,
+              bolsaComp: bolsaComp,
+              esInvitado: widget.esInvitado,
+              nombreCompleto: nombreCompleto,
+              onAjustar: (context, id, cant, motivo) =>
+                  _procesarAjusteInventario(
+                    context,
+                    id,
+                    cant,
+                    nombreCompleto,
+                    motivo,
+                  ),
+            ),
+          ),
+
+          Builder(
+            builder: (context) {
+              final tabController = DefaultTabController.of(context);
+              return AnimatedBuilder(
+                animation: tabController,
+                builder: (context, _) {
+                  final index = tabController.index;
+                  if (widget.esInvitado) {
+                    return _buildInventarioSliver(
+                      sacoDisp,
+                      bolsaDisp,
+                      nombreCompleto,
+                      rolActual,
+                      sacoFisico,
+                      sacoComp,
+                      bolsaFisico,
+                      bolsaComp,
+                    );
+                  }
+
+                  switch (index) {
+                    case 0:
+                      return _buildInventarioSliver(
+                        sacoDisp,
+                        bolsaDisp,
+                        nombreCompleto,
+                        rolActual,
+                        sacoFisico,
+                        sacoComp,
+                        bolsaFisico,
+                        bolsaComp,
+                      );
+                    case 1:
+                      return _buildPedidosSliver(
+                        rolActual,
+                        nombreCompleto,
+                        sacoFisico,
+                        sacoComp,
+                        bolsaFisico,
+                        bolsaComp,
+                      );
+                    case 2:
+                      return _buildCitasSliver(
+                        rolActual,
+                        nombreCompleto,
+                        sacoFisico,
+                        sacoComp,
+                        bolsaFisico,
+                        bolsaComp,
+                      );
+                    case 3:
+                      return _buildConfiguracionesSliver(rolActual, userData);
+                    default:
+                      return const SliverToBoxAdapter(child: SizedBox());
+                  }
+                },
+              );
+            },
+          ),
+
+          const SliverToBoxAdapter(child: SizedBox(height: 100)),
+        ],
       ),
     );
   }
 
   Future<void> _procesarAjusteInventario(
+    BuildContext context,
     String id,
     int cantidad,
     String autor,
+    String motivo,
   ) async {
     try {
-      await _dbService.ajustarStock(id, cantidad, autor);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text("Inventario actualizado por $autor"),
-            backgroundColor: Colors.green,
-          ),
-        );
-      }
+      await _dbService.ajustarStock(id, cantidad, autor, motivo: motivo);
+      if (!context.mounted) return;
+      final messenger = ScaffoldMessenger.of(context);
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text("Inventario actualizado por $autor | Motivo: $motivo"),
+          backgroundColor: Colors.green,
+        ),
+      );
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("Error: $e"), backgroundColor: Colors.red),
-        );
-      }
+      if (!context.mounted) return;
+      final messenger = ScaffoldMessenger.of(context);
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(e.toString().replaceAll('Exception: ', '')),
+          backgroundColor: Colors.red,
+        ),
+      );
     }
   }
 
-  Widget _buildNavigationRail(BuildContext railContext, String nombreCompleto) {
+  Widget _buildNavigationRail(
+    BuildContext railContext,
+    String nombreCompleto,
+    int sacoFisico,
+    int sacoComp,
+    int bolsaFisico,
+    int bolsaComp,
+  ) {
     final controller = DefaultTabController.of(railContext);
     return NavigationRail(
       selectedIndex: controller.index,
@@ -393,8 +472,14 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
             mini: true,
             elevation: 0,
             backgroundColor: AppColors.secondary,
-            onPressed: () =>
-                _mostrarDialogoNuevoPedido(context, nombreCompleto),
+            onPressed: () => _mostrarDialogoNuevoPedido(
+              context,
+              nombreCompleto,
+              sacoFisico,
+              sacoComp,
+              bolsaFisico,
+              bolsaComp,
+            ),
             child: const Icon(Icons.add, color: Colors.white),
           ),
           const SizedBox(height: 10),
@@ -452,116 +537,6 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
     );
   }
 
-  Widget _buildDrawer(
-    BuildContext context,
-    String nombreCompleto,
-    String rolActual,
-  ) {
-    return Drawer(
-      backgroundColor: AppColors.primary,
-      child: Column(
-        children: [
-          DrawerHeader(
-            decoration: const BoxDecoration(color: AppColors.primary),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Image.asset('assets/frifalca6.png', height: 60),
-                const SizedBox(height: 10),
-                const Text(
-                  "Frifalca C.A.",
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          _buildDrawerItem(
-            context,
-            icon: Icons.grid_view_rounded,
-            label: "Panel Principal",
-            index: 0,
-          ),
-          _buildDrawerItem(
-            context,
-            icon: Icons.receipt_long_rounded,
-            label: "Pedidos",
-            index: 1,
-          ),
-          _buildDrawerItem(
-            context,
-            icon: Icons.calendar_month_rounded,
-            label: "Citas",
-            index: 2,
-          ),
-          _buildDrawerItem(
-            context,
-            icon: Icons.settings_rounded,
-            label: "Configuración",
-            index: 3,
-          ),
-          const Divider(color: Colors.white24, indent: 20, endIndent: 20),
-          ListTile(
-            leading: const Icon(
-              Icons.add_circle_outline,
-              color: AppColors.secondary,
-            ),
-            title: const Text(
-              "Añadir Pedido",
-              style: TextStyle(
-                color: Colors.white,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            onTap: () {
-              Navigator.pop(context); // Cierra drawer
-              _mostrarDialogoNuevoPedido(context, nombreCompleto);
-            },
-          ),
-          const Spacer(),
-          ListTile(
-            leading: const Icon(Icons.logout, color: AppColors.error),
-            title: const Text(
-              "Cerrar Sesión",
-              style: TextStyle(color: Colors.white),
-            ),
-            onTap: () => _mostrarConfirmacionLogout(context),
-          ),
-          const SizedBox(height: 20),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildDrawerItem(
-    BuildContext context, {
-    required IconData icon,
-    required String label,
-    required int index,
-  }) {
-    final controller = DefaultTabController.of(context);
-    bool selected = controller.index == index;
-    return ListTile(
-      leading: Icon(
-        icon,
-        color: selected ? AppColors.secondary : Colors.white70,
-      ),
-      title: Text(
-        label,
-        style: TextStyle(
-          color: selected ? AppColors.secondary : Colors.white70,
-          fontWeight: selected ? FontWeight.bold : FontWeight.normal,
-        ),
-      ),
-      onTap: () {
-        controller.animateTo(index);
-        Navigator.pop(context);
-      },
-    );
-  }
-
   Widget _buildGreetingCard(String nombre) {
     return Container(
       width: double.infinity,
@@ -592,37 +567,9 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
           const SizedBox(height: 5),
           Text(
             "¡Buen día, ${nombre.split(' ')[0]}!",
-            style: Theme.of(context).textTheme.titleLarge?.copyWith(
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildAlertaProduccion() {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-      margin: const EdgeInsets.only(bottom: 20),
-      decoration: BoxDecoration(
-        color: Colors.red[900],
-        borderRadius: BorderRadius.circular(10),
-      ),
-      child: const Row(
-        children: [
-          Icon(Icons.report_problem, color: Colors.white, size: 18),
-          SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              "⚠️ ALERTA: Producción detenida.",
-              style: TextStyle(
-                color: Colors.white,
-                fontWeight: FontWeight.bold,
-                fontSize: 13,
-              ),
-            ),
+            style: Theme.of(
+              context,
+            ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
           ),
         ],
       ),
@@ -712,318 +659,442 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
     );
   }
 
-  Widget _buildPedidosTab(String rolActual, String nombreCompleto) {
-    return Column(
-      children: [
-        // --- BARRA DE BÚSQUEDA Y FILTROS ---
-        Padding(
-          padding: const EdgeInsets.fromLTRB(20, 10, 20, 5),
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 15),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(20),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.05),
-                  blurRadius: 10,
-                  offset: const Offset(0, 4),
+  Widget _buildPedidosSliver(
+    String rolActual,
+    String nombreCompleto,
+    int sF,
+    int sC,
+    int bF,
+    int bC,
+  ) {
+    return SliverToBoxAdapter(
+      child: Column(
+        children: [
+          // --- BARRA DE BÚSQUEDA Y FILTROS ---
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+            child: Container(
+              padding: const EdgeInsets.symmetric(
+                horizontal: 10,
+              ), // Reducido de 15
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(
+                  15,
+                ), // Reducido de 20 para ser más profesional
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.05),
+                    blurRadius: 10,
+                    offset: const Offset(0, 4),
+                  ),
+                ],
+              ),
+              child: TextField(
+                onChanged: (val) => setState(() => _filtroTicket = val),
+                decoration: const InputDecoration(
+                  hintText: "Buscar por ticket...",
+                  hintStyle: TextStyle(color: Colors.grey, fontSize: 13),
+                  prefixIcon: Icon(
+                    Icons.search_rounded,
+                    color: AppColors.secondary,
+                  ),
+                  border: InputBorder.none,
+                  contentPadding: EdgeInsets.symmetric(
+                    vertical: 12,
+                  ), // Ajuste interno
                 ),
-              ],
-            ),
-            child: TextField(
-              onChanged: (val) => setState(() => _filtroTicket = val),
-              decoration: const InputDecoration(
-                hintText: "Buscar por número de ticket...",
-                hintStyle: TextStyle(color: Colors.grey, fontSize: 14),
-                prefixIcon: Icon(
-                  Icons.search_rounded,
-                  color: AppColors.secondary,
-                ),
-                border: InputBorder.none,
-                contentPadding: EdgeInsets.symmetric(vertical: 15),
               ),
             ),
           ),
-        ),
 
-        // --- FILTROS HORIZONTALES ---
-        SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 10),
-          child: Row(
-            children: [
-              _buildFilterChip("Todos"),
-              _buildFilterChip("Pendiente", label: "En espera"),
-              _buildFilterChip("Despachado"),
-              _buildFilterChip("Cancelado"),
-            ],
+          // --- FILTROS HORIZONTALES ---
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 10),
+            child: Row(
+              children: [
+                _buildFilterChip("Todos"),
+                _buildFilterChip("Pendiente", label: "En espera"),
+                _buildFilterChip("Despachado"),
+                _buildFilterChip("Cancelado"),
+              ],
+            ),
           ),
-        ),
-        Expanded(
-          child: StreamBuilder<List<Pedido>>(
+
+          StreamBuilder<List<Pedido>>(
             stream: _dbService.streamPedidos(
               filtroEstado: _filtroEstado,
               filtroTicket: _filtroTicket,
             ),
             builder: (context, snapshot) {
-              debugPrint(
-                "DEBUG: Stream Pedidos - Estado: ${snapshot.connectionState}",
-              );
-              debugPrint(
-                "DEBUG: Stream Pedidos - Cantidad: ${snapshot.data?.length ?? 0}",
-              );
-              debugPrint(
-                "DEBUG: Filtros actuales - Estado: $_filtroEstado, Ticket: $_filtroTicket",
-              );
-
-              if (snapshot.hasError) {
-                debugPrint("DEBUG: Erro en Stream Pedidos: ${snapshot.error}");
-                return Center(child: Text("Error: ${snapshot.error}"));
+              if (snapshot.connectionState == ConnectionState.waiting) {
+                return const Padding(
+                  padding: EdgeInsets.all(40),
+                  child: Center(child: CircularProgressIndicator()),
+                );
               }
-
-              if (!snapshot.hasData) {
-                return const Center(child: CircularProgressIndicator());
-              }
-
-              final pedidos = snapshot.data!;
+              final pedidos = snapshot.data ?? [];
               if (pedidos.isEmpty) {
-                return const Center(
-                  child: Text(
-                    "No se encontraron pedidos con estos filtros.",
-                    style: TextStyle(color: Colors.grey),
-                  ),
+                return const Padding(
+                  padding: EdgeInsets.all(40),
+                  child: Center(child: Text("Sin resultados")),
                 );
               }
 
-              return Scrollbar(
-                thumbVisibility: true,
-                controller: ScrollController(),
-                child: ListView.builder(
-                  padding: const EdgeInsets.all(15),
-                  itemCount: pedidos.length,
-                  shrinkWrap: true,
-                  physics:
-                      const ClampingScrollPhysics(), // Cambiado para mejor integración
-                  itemBuilder: (context, index) {
-                    final pedido = pedidos[index];
-                    return comp.PedidoCard(
-                      pedido: pedido,
-                      onTap: () => _mostrarDetalleCompleto(
-                        context,
-                        pedido,
-                        rolActual,
-                        nombreCompleto,
-                      ),
-                      trailingActions: pedido.estado == 'Pendiente'
-                          ? Row(
-                              children: [
-                                if (rolActual == "admin")
-                                  IconButton(
-                                    icon: const Icon(
-                                      Icons.cancel_outlined,
-                                      color: Colors.red,
-                                    ),
-                                    onPressed: () => _confirmarAccion(
-                                      context: context,
-                                      titulo: "Cancelar Pedido",
-                                      mensaje:
-                                          "¿Seguro que quieres cancelar el ticket ${pedido.ticket}?",
-                                      colorBoton: Colors.red,
-                                      textoBoton: "Sí, cancelar",
-                                      onConfirm: () async {
-                                        await _dbService.cancelarPedido(
-                                          pedido.id,
-                                          cantSaco: pedido.cantSaco,
-                                          cantBolsa: pedido.cantBolsa,
-                                        );
-                                        _notificarExito(
-                                          "Pedido #${pedido.ticket} cancelado",
-                                        );
-                                      },
-                                    ),
+              return ListView.builder(
+                padding: const EdgeInsets.all(15),
+                itemCount: pedidos.length,
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                itemBuilder: (context, index) {
+                  final pedido = pedidos[index];
+                  return comp.PedidoCard(
+                    pedido: pedido,
+                    onTap: () => _mostrarDetalleCompleto(
+                      context,
+                      pedido,
+                      rolActual,
+                      nombreCompleto,
+                      sF,
+                      sC,
+                      bF,
+                      bC,
+                    ),
+                    trailingActions: pedido.estado == 'Pendiente'
+                        ? Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              _buildActionButton(
+                                Icons.cancel_outlined,
+                                Colors.red,
+                                () async {
+                                  final confirmar =
+                                      await _mostrarDialogoConfirmacion(
+                                        context,
+                                        "¿Está seguro de que desea CANCELAR este pedido?",
+                                        "Esta acción no se puede deshacer.",
+                                        Colors.red,
+                                      );
+                                  if (confirmar == true) {
+                                    try {
+                                      await _dbService.cancelarPedido(
+                                        pedido.id,
+                                        cantSaco: pedido.cantSaco,
+                                        cantBolsa: pedido.cantBolsa,
+                                      );
+                                      if (!context.mounted) return;
+                                      _notificarExito(
+                                        "Pedido #${pedido.ticket} cancelado",
+                                      );
+                                    } catch (e) {
+                                      if (!context.mounted) return;
+                                      ScaffoldMessenger.of(
+                                        context,
+                                      ).showSnackBar(
+                                        SnackBar(
+                                          content: Text(
+                                            "Error al cancelar: ${e.toString().replaceAll('Exception: ', '')}",
+                                          ),
+                                          backgroundColor: Colors.red,
+                                          behavior: SnackBarBehavior.floating,
+                                          shape: RoundedRectangleBorder(
+                                            borderRadius: BorderRadius.circular(
+                                              15,
+                                            ),
+                                          ),
+                                        ),
+                                      );
+                                    }
+                                  }
+                                },
+                              ),
+                              const SizedBox(width: 8),
+                              ElevatedButton(
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: Colors.green,
+                                  foregroundColor: Colors.white,
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 12,
                                   ),
-                                const SizedBox(width: 4),
-                                ElevatedButton(
-                                  style: ElevatedButton.styleFrom(
-                                    backgroundColor: Colors.green[50],
-                                    foregroundColor: Colors.green,
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 12,
-                                    ),
-                                    minimumSize: const Size(0, 32),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(15),
                                   ),
-                                  onPressed: () => _confirmarAccion(
-                                    context: context,
-                                    titulo: "Despachar Pedido",
-                                    mensaje:
-                                        "¿Confirmas el despacho del ticket ${pedido.ticket}?",
-                                    colorBoton: Colors.green,
-                                    textoBoton: "Confirmar Despacho",
-                                    onConfirm: () async {
+                                  elevation: 0,
+                                ),
+                                onPressed: () async {
+                                  final confirmar =
+                                      await _mostrarDialogoConfirmacion(
+                                        context,
+                                        "¿Está seguro de que desea DESPACHAR este pedido?",
+                                        "Se descontará del inventario físico.",
+                                        Colors.green,
+                                      );
+                                  if (confirmar == true) {
+                                    try {
                                       await _dbService.despacharPedido(
                                         pedido.id,
                                         nombreCompleto,
                                         cantSaco: pedido.cantSaco,
                                         cantBolsa: pedido.cantBolsa,
                                       );
+                                      if (!context.mounted) return;
                                       _notificarExito(
                                         "Pedido #${pedido.ticket} despachado con éxito",
                                       );
-                                    },
-                                  ),
-                                  child: const Text(
-                                    "Despachar",
-                                    style: TextStyle(fontSize: 12),
+                                    } catch (e) {
+                                      if (!context.mounted) return;
+                                      ScaffoldMessenger.of(
+                                        context,
+                                      ).showSnackBar(
+                                        SnackBar(
+                                          content: Text(
+                                            e.toString().replaceAll(
+                                              'Exception: ',
+                                              '',
+                                            ),
+                                          ),
+                                          backgroundColor: Colors.red,
+                                          behavior: SnackBarBehavior.floating,
+                                          shape: RoundedRectangleBorder(
+                                            borderRadius: BorderRadius.circular(
+                                              15,
+                                            ),
+                                          ),
+                                        ),
+                                      );
+                                    }
+                                  } else {
+                                    if (!context.mounted) return;
+                                    _mostrarMensaje(
+                                      "Acción cancelada",
+                                      esError: true,
+                                    );
+                                  }
+                                },
+                                child: const Text(
+                                  "Despachar",
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.bold,
                                   ),
                                 ),
-                              ],
-                            )
-                          : null,
-                    );
-                  },
-                ),
+                              ),
+                            ],
+                          )
+                        : null,
+                  );
+                },
               );
             },
           ),
-        ),
-      ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildActionButton(
+    IconData icon,
+    Color color,
+    VoidCallback onPressed,
+  ) {
+    return Container(
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.1),
+        shape: BoxShape.circle,
+      ),
+      child: IconButton(
+        icon: Icon(icon, color: color, size: 20),
+        onPressed: onPressed,
+      ),
     );
   }
 
   // Dentro de _PanelPrincipalState en panel_principal.dart
-  Widget _buildInventarioTabContent(
+  Widget _buildInventarioSliver(
     int sacoDisp,
     int bolsaDisp,
     String nombreCompleto,
     String rolActual,
+    int sF,
+    int sC,
+    int bF,
+    int bC,
   ) {
-    return StreamBuilder<List<Pedido>>(
-      stream: _dbService.streamPedidos(filtroEstado: "Pendiente"),
-      builder: (context, pedidoSnap) {
-        if (pedidoSnap.hasError) {
-          return const Center(child: Text("Error de conexión"));
-        }
-        if (!pedidoSnap.hasData) {
-          return const Center(child: CircularProgressIndicator());
-        }
-
-        final bool isDesktop = MediaQuery.of(context).size.width > 800;
-        return Scrollbar(
-          thumbVisibility: true,
-          controller:
-              ScrollController(), // Evita conflictos con el Scrollbar principal
-          child: ListView(
-            padding: EdgeInsets.fromLTRB(20, isDesktop ? 10 : 20, 20, 20),
-            children: [
-              if (!isDesktop) const Divider(),
-              comp.ListaPedidosPendientes(
-                pedidos: pedidoSnap.data ?? [],
-                stockSacoDisp: sacoDisp,
-                stockBolsaDisp: bolsaDisp,
-                onDespachar: (pedido) {
-                  _confirmarAccion(
-                    context: context,
-                    titulo: "Despachar Ahora",
-                    mensaje:
-                        "¿Confirmas el despacho rápido del ticket ${pedido.ticket}?",
-                    colorBoton: Colors.green,
-                    textoBoton: "Sí, despachar",
-                    onConfirm: () async {
-                      await _dbService.despacharPedido(
-                        pedido.id,
-                        nombreCompleto,
-                        cantSaco: pedido.cantSaco,
-                        cantBolsa: pedido.cantBolsa,
-                      );
-                      _notificarExito("Pedido #${pedido.ticket} despachado!");
-                    },
+    return SliverToBoxAdapter(
+      child: StreamBuilder<List<Pedido>>(
+        stream: _dbService.streamPedidos(filtroEstado: "Pendiente"),
+        builder: (context, pedidoSnap) {
+          if (!pedidoSnap.hasData) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          return comp.ListaPedidosPendientes(
+            pedidos: pedidoSnap.data ?? [],
+            stockSacoDisp: sacoDisp,
+            stockBolsaDisp: bolsaDisp,
+            onDespachar: (pedido) async {
+              final confirmar = await _mostrarDialogoConfirmacion(
+                context,
+                "¿Está seguro de que desea DESPACHAR este pedido?",
+                "Se descontará del inventario físico.",
+                Colors.green,
+              );
+              if (confirmar == true) {
+                try {
+                  await _dbService.despacharPedido(
+                    pedido.id,
+                    nombreCompleto,
+                    cantSaco: pedido.cantSaco,
+                    cantBolsa: pedido.cantBolsa,
                   );
-                },
-                onShowDetails: (pedido) => _mostrarDetalleCompleto(
-                  context,
-                  pedido,
-                  rolActual,
-                  nombreCompleto,
-                ),
-              ),
-            ],
-          ),
-        );
-      },
+                  if (!context.mounted) return;
+                  _notificarExito("Pedido despachado exitosamente");
+                } catch (e) {
+                  if (!context.mounted) return;
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text(e.toString().replaceAll('Exception: ', '')),
+                      backgroundColor: Colors.red,
+                      behavior: SnackBarBehavior.floating,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(15),
+                      ),
+                    ),
+                  );
+                }
+              } else {
+                if (!context.mounted) return;
+                _mostrarMensaje("Acción cancelada", esError: true);
+              }
+            },
+            onShowDetails: (pedido) => _mostrarDetalleCompleto(
+              context,
+              pedido,
+              rolActual,
+              nombreCompleto,
+              sF,
+              sC,
+              bF,
+              bC,
+            ),
+          );
+        },
+      ),
     );
   }
 
-  Widget _buildCitasTab() {
-    return Column(
-      children: [
-        Padding(
-          padding: const EdgeInsets.all(15),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              const Text(
-                "Agenda de hoy",
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-              ),
-              IconButton(
-                icon: const Icon(Icons.calendar_today),
-                onPressed: () async {
-                  final picked = await showDatePicker(
-                    context: context,
-                    initialDate: _selectedDate,
-                    firstDate: DateTime(2000),
-                    lastDate: DateTime(2100),
-                  );
-                  if (picked != null) {
-                    setState(() => _selectedDate = picked);
-                  }
-                },
-              ),
-            ],
-          ),
-        ),
-        Expanded(
-          child: StreamBuilder<List<Cita>>(
-            stream: _dbService.streamCitas(_selectedDate),
-            builder: (context, snapshot) {
-              final citas = snapshot.data ?? [];
-              return Scrollbar(
-                thumbVisibility: true,
-                child: ListView.builder(
-                  padding: const EdgeInsets.symmetric(horizontal: 15),
-                  itemCount: 48, // De 08:00 a 16:00 son 8 horas * 6 slots = 48
-                  itemBuilder: (context, index) {
-                    // Generar slots de 10 min desde 08:00
-                    final totalMinutes = 8 * 60 + (index * 10);
-                    final hour = totalMinutes ~/ 60;
-                    final min = totalMinutes % 60;
-                    final slotTime =
-                        "${hour.toString().padLeft(2, '0')}:${min.toString().padLeft(2, '0')}";
-
-                    final citaEnSlot = citas.firstWhere(
-                      (c) => c.slot == slotTime,
-                      orElse: () => Cita(
-                        id: '',
-                        nombre: '',
-                        motivo: '',
-                        fecha: DateTime.now(),
-                        slot: '',
-                      ),
+  Widget _buildCitasSliver(
+    String rolActual,
+    String nombreCompleto,
+    int sF,
+    int sC,
+    int bF,
+    int bC,
+  ) {
+    return SliverToBoxAdapter(
+      child: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(15),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text(
+                  "Agenda de hoy",
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.calendar_today),
+                  onPressed: () async {
+                    final picked = await showDatePicker(
+                      context: context,
+                      initialDate: _selectedDate,
+                      firstDate: DateTime(2000),
+                      lastDate: DateTime(2100),
                     );
-
-                    return _buildSlotCard(slotTime, citaEnSlot);
+                    if (picked != null) {
+                      setState(() {
+                        _selectedDate = picked;
+                        _citasStream = _dbService.streamCitasDelDia(
+                          _selectedDate,
+                        );
+                      });
+                    }
                   },
                 ),
+              ],
+            ),
+          ),
+          StreamBuilder<List<Cita>>(
+            stream: _citasStream,
+            builder: (context, snapshot) {
+              final citas = snapshot.data ?? [];
+
+              // Lógica de sincronización automática (Validación de pedidos)
+              for (var c in citas) {
+                if (c.idPedido != null && !c.estadoAgendado) {
+                  _verificarSincronizacionCita(c);
+                }
+              }
+
+              return ListView.builder(
+                padding: const EdgeInsets.symmetric(horizontal: 15),
+                itemCount: 48,
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                itemBuilder: (context, index) {
+                  final totalMinutes = 8 * 60 + (index * 10);
+                  final hour = totalMinutes ~/ 60;
+                  final min = totalMinutes % 60;
+                  final slotTime =
+                      "${hour.toString().padLeft(2, '0')}:${min.toString().padLeft(2, '0')}";
+                  final citaEnSlot = citas.firstWhere(
+                    (c) => c.slot == slotTime,
+                    orElse: () => Cita(
+                      id: '',
+                      nombre: '',
+                      motivo: '',
+                      fecha: DateTime.now(),
+                      slot: '',
+                    ),
+                  );
+                  return _buildSlotCard(
+                    slotTime,
+                    citaEnSlot,
+                    rolActual,
+                    nombreCompleto,
+                    sF,
+                    sC,
+                    bF,
+                    bC,
+                  );
+                },
               );
             },
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 
-  Widget _buildSlotCard(String slotTime, Cita cita) {
+  void _verificarSincronizacionCita(Cita cita) async {
+    if (cita.idPedido == null) return;
+    final pedido = await _dbService.getPedidoById(cita.idPedido!);
+    if (pedido != null && cita.debeMarcarseComoCompletada(pedido.estado)) {
+      await _dbService.actualizarEstadoAgendado(cita.id, true);
+    }
+  }
+
+  Widget _buildSlotCard(
+    String slotTime,
+    Cita cita,
+    String rolActual,
+    String nombreCompleto,
+    int sF,
+    int sC,
+    int bF,
+    int bC,
+  ) {
     bool ocupado = cita.id.isNotEmpty;
 
     // Parseo seguro de color hex
@@ -1042,6 +1113,25 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
       margin: const EdgeInsets.only(bottom: 8),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
       child: ListTile(
+        onTap: () async {
+          if (cita.idPedido != null && cita.idPedido!.isNotEmpty) {
+            final p = await _dbService.getPedidoById(cita.idPedido!);
+            if (p != null && mounted) {
+              _mostrarDetalleCompleto(
+                context,
+                p,
+                rolActual,
+                nombreCompleto,
+                sF,
+                sC,
+                bF,
+                bC,
+              );
+            }
+          } else {
+            _mostrarDialogoCita(slotTime, cita);
+          }
+        },
         leading: Container(
           width: 60,
           padding: const EdgeInsets.symmetric(vertical: 8),
@@ -1062,7 +1152,22 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
             fontWeight: ocupado ? FontWeight.bold : FontWeight.normal,
           ),
         ),
-        subtitle: ocupado ? Text(cita.motivo) : const Text("Espacio libre"),
+        subtitle: ocupado
+            ? Row(
+                children: [
+                  if (cita.idPedido != null)
+                    const Icon(Icons.link, size: 14, color: Colors.grey),
+                  if (cita.idPedido != null) const SizedBox(width: 4),
+                  Expanded(
+                    child: Text(
+                      cita.motivo,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              )
+            : const Text("Espacio libre"),
         trailing: IconButton(
           icon: Icon(
             ocupado
@@ -1107,8 +1212,27 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
             if (!cita.estadoAgendado)
               ElevatedButton(
                 onPressed: () async {
-                  await _dbService.actualizarEstadoAgendado(cita.id, true);
-                  if (context.mounted) Navigator.pop(context);
+                  try {
+                    await _dbService.actualizarEstadoAgendado(cita.id, true);
+                    if (context.mounted) {
+                      Navigator.pop(context);
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text("Cita marcada como buscada"),
+                          backgroundColor: Colors.green,
+                        ),
+                      );
+                    }
+                  } catch (e) {
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text("Error al actualizar cita: $e"),
+                          backgroundColor: Colors.red,
+                        ),
+                      );
+                    }
+                  }
                 },
                 style: ElevatedButton.styleFrom(backgroundColor: Colors.green),
                 child: const Text(
@@ -1231,16 +1355,39 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
               onPressed: idPedidoSel == null
                   ? null
                   : () async {
-                      await _dbService.crearCita(
-                        nombre: nombreClienteSel ?? "Cliente",
-                        motivo: motivoCtrl.text,
-                        fecha: _selectedDate,
-                        slot: slot,
-                        idPedido: idPedidoSel,
-                        idCliente: idClienteSel,
-                        nombreCliente: nombreClienteSel,
-                      );
-                      if (context.mounted) Navigator.pop(context);
+                      try {
+                        final nuevaCita = Cita(
+                          id: '', // Firestore genera el ID
+                          nombre: nombreClienteSel ?? "Cliente",
+                          motivo: motivoCtrl.text,
+                          fecha: _selectedDate,
+                          slot: slot,
+                          idPedido: idPedidoSel,
+                          idCliente: idClienteSel,
+                          nombreCliente: nombreClienteSel,
+                        );
+
+                        await _dbService.agendarCita(nuevaCita);
+
+                        if (context.mounted) {
+                          Navigator.pop(context);
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text("Cita agendada con éxito"),
+                              backgroundColor: Colors.green,
+                            ),
+                          );
+                        }
+                      } catch (e) {
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text("Error al agendar cita: $e"),
+                              backgroundColor: Colors.red,
+                            ),
+                          );
+                        }
+                      }
                     },
               child: const Text("Confirmar Agenda"),
             ),
@@ -1278,76 +1425,124 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
     );
   }
 
-  Widget _buildConfiguracionesTab(
+  Widget _buildConfiguracionesSliver(
     String rolActual,
     Map<String, dynamic> userData,
   ) {
-    return Scrollbar(
-      thumbVisibility: true,
-      child: ListView(
+    return SliverToBoxAdapter(
+      child: Padding(
         padding: const EdgeInsets.all(20),
-        children: [
-          const Text(
-            "Configuraciones",
-            style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
-          ),
-          const SizedBox(height: 20),
-          ListTile(
-            leading: const Icon(Icons.person, color: Colors.cyan),
-            title: const Text("Perfil"),
-            subtitle: const Text("Ver tus datos y cambiar contraseña"),
-            tileColor: Theme.of(context).cardColor,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(15),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              "Configuraciones",
+              style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
             ),
-            onTap: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (context) => Scaffold(
-                    appBar: AppBar(title: const Text("Perfil")),
-                    body: _buildPerfilWidget(userData),
-                  ),
-                ),
-              );
-            },
-          ),
-          const SizedBox(height: 10),
-          if (rolActual == "admin") ...[
-            ListTile(
-              leading: const Icon(Icons.history_edu, color: Colors.purple),
-              title: const Text("Bitácora"),
-              subtitle: const Text("Historial de auditoría del sistema"),
-              tileColor: Theme.of(context).cardColor,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(15),
-              ),
+            const SizedBox(height: 20),
+            _buildSettingsTile(
+              icon: Icons.person_outline_rounded,
+              color: Colors.cyan,
+              title: "Mi Perfil",
+              subtitle: "Gestión de cuenta y seguridad",
               onTap: () {
                 Navigator.push(
                   context,
                   MaterialPageRoute(
-                    builder: (context) => const BitacoraScreen(),
+                    builder: (context) => Scaffold(
+                      appBar: AppBar(title: const Text("Perfil")),
+                      body: _buildPerfilWidget(userData),
+                    ),
                   ),
                 );
               },
             ),
             const SizedBox(height: 10),
-            ListTile(
-              leading: const Icon(
-                Icons.admin_panel_settings,
-                color: Colors.red,
+            _buildSettingsTile(
+              icon: Icons.help_outline_rounded,
+              color: AppColors.secondary,
+              title: "Centro de Ayuda",
+              subtitle: "Tutoriales y soporte técnico",
+              onTap: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (context) => const AyudaScreen()),
+                );
+              },
+            ),
+            if (rolActual == "admin") ...[
+              const SizedBox(height: 10),
+              _buildSettingsTile(
+                icon: Icons.admin_panel_settings_outlined,
+                color: Colors.redAccent,
+                title: "Panel de Control Admin",
+                subtitle: "Gestión avanzada de usuarios y datos",
+                onTap: () => _mostrarPanelAdmin(context, rolActual),
               ),
-              title: const Text("Panel Admin"),
-              subtitle: const Text("Gestión de usuarios y sistema"),
-              tileColor: Theme.of(context).cardColor,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(15),
+            ],
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 30),
+              child: SizedBox(
+                width: double.infinity,
+                child: Column(
+                  children: [
+                    SizedBox(height: 20),
+                    Text(
+                      '© 2026 Todos los Derechos Reservados',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: Color(
+                          0x999E9E9E,
+                        ), // Colors.grey.withValues(alpha: 0.6)
+                        fontSize: 12,
+                      ),
+                    ),
+                    Text(
+                      'Desarrollado por Aldayr García',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: Color(0x999E9E9E), fontSize: 12),
+                    ),
+                    Text(
+                      'Bajo la tutoría del Ing. Andrik Arguello',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: Color(0x999E9E9E),
+                        fontSize: 12,
+                        fontStyle: FontStyle.italic,
+                      ),
+                    ),
+                  ],
+                ),
               ),
-              onTap: () => _mostrarPanelAdmin(context, rolActual),
             ),
           ],
-        ],
+        ),
       ),
+    );
+  }
+
+  Widget _buildSettingsTile({
+    required IconData icon,
+    required Color color,
+    required String title,
+    required String subtitle,
+    required VoidCallback onTap,
+  }) {
+    return ListTile(
+      leading: Container(
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.1),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Icon(icon, color: color),
+      ),
+      title: Text(title, style: const TextStyle(fontWeight: FontWeight.bold)),
+      subtitle: Text(subtitle, style: const TextStyle(fontSize: 12)),
+      tileColor: Theme.of(context).cardColor,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+      trailing: const Icon(Icons.chevron_right_rounded, size: 20),
+      onTap: onTap,
     );
   }
 
@@ -1430,7 +1625,6 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
                 },
               ),
             ],
-
             const SizedBox(height: 15),
             // --- SECCIÓN PRUEBA FCM (Temporal) ---
             _buildAdminActionTile(
@@ -1496,26 +1690,40 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text("Nuevo Cliente"),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: nomCtrl,
-              decoration: const InputDecoration(labelText: "Nombre"),
+        content: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 700),
+          child: Form(
+            key: _formKeyCliente,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextFormField(
+                  controller: nomCtrl,
+                  decoration: const InputDecoration(labelText: "Nombre"),
+                  validator: (v) =>
+                      v == null || v.isEmpty ? "Campo obligatorio" : null,
+                ),
+                const SizedBox(height: 30),
+                TextFormField(
+                  controller: apeCtrl,
+                  decoration: const InputDecoration(labelText: "Apellido"),
+                  validator: (v) =>
+                      v == null || v.isEmpty ? "Campo obligatorio" : null,
+                ),
+                const SizedBox(height: 30),
+                TextFormField(
+                  controller: cedCtrl,
+                  decoration: const InputDecoration(
+                    labelText: "Cédula",
+                    prefixText: "V-",
+                  ),
+                  keyboardType: TextInputType.number,
+                  validator: (v) =>
+                      v == null || v.isEmpty ? "Campo obligatorio" : null,
+                ),
+              ],
             ),
-            TextField(
-              controller: apeCtrl,
-              decoration: const InputDecoration(labelText: "Apellido"),
-            ),
-            TextField(
-              controller: cedCtrl,
-              decoration: const InputDecoration(
-                labelText: "Cédula",
-                prefixText: "V-",
-              ),
-              keyboardType: TextInputType.number,
-            ),
-          ],
+          ),
         ),
         actions: [
           TextButton(
@@ -1524,9 +1732,7 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
           ),
           ElevatedButton(
             onPressed: () async {
-              if (nomCtrl.text.isNotEmpty &&
-                  apeCtrl.text.isNotEmpty &&
-                  cedCtrl.text.isNotEmpty) {
+              if (_formKeyCliente.currentState?.validate() ?? false) {
                 await _dbService.registrarCliente(
                   nombre: nomCtrl.text.trim(),
                   apellido: apeCtrl.text.trim(),
@@ -1561,42 +1767,62 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
       builder: (context) => StatefulBuilder(
         builder: (context, setState) => AlertDialog(
           title: const Text("Pre-autorizar Trabajador"),
-          content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Text(
-                  "Instrucción: El empleado deberá completar su registro desde su propio dispositivo usando este correo.",
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: Colors.orange,
-                    fontWeight: FontWeight.bold,
-                  ),
+          content: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 700),
+            child: Form(
+              key: _formKeyTrabajador,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text(
+                      "Instrucción: El empleado deberá completar su registro desde su propio dispositivo usando este correo.",
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: Colors.orange,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 30),
+                    TextFormField(
+                      controller: correoCtrl,
+                      decoration: const InputDecoration(
+                        labelText: "Correo Electrónico",
+                      ),
+                      validator: (v) => v == null || !v.contains('@')
+                          ? "Correo inválido"
+                          : null,
+                    ),
+                    const SizedBox(height: 30),
+                    TextFormField(
+                      controller: nomCtrl,
+                      decoration: const InputDecoration(labelText: "Nombre"),
+                      validator: (v) =>
+                          v == null || v.isEmpty ? "Campo obligatorio" : null,
+                    ),
+                    const SizedBox(height: 30),
+                    TextFormField(
+                      controller: apeCtrl,
+                      decoration: const InputDecoration(labelText: "Apellido"),
+                      validator: (v) =>
+                          v == null || v.isEmpty ? "Campo obligatorio" : null,
+                    ),
+                    const SizedBox(height: 30),
+                    DropdownButtonFormField<String>(
+                      initialValue: rolSel,
+                      items: ["Empleado", "admin"]
+                          .map(
+                            (e) => DropdownMenuItem(value: e, child: Text(e)),
+                          )
+                          .toList(),
+                      onChanged: (v) => setState(() => rolSel = v!),
+                      decoration: const InputDecoration(
+                        labelText: "Rol asignado",
+                      ),
+                    ),
+                  ],
                 ),
-                const SizedBox(height: 15),
-                TextField(
-                  controller: correoCtrl,
-                  decoration: const InputDecoration(
-                    labelText: "Correo Electrónico",
-                  ),
-                ),
-                TextField(
-                  controller: nomCtrl,
-                  decoration: const InputDecoration(labelText: "Nombre"),
-                ),
-                TextField(
-                  controller: apeCtrl,
-                  decoration: const InputDecoration(labelText: "Apellido"),
-                ),
-                DropdownButtonFormField<String>(
-                  initialValue: rolSel,
-                  items: ["Empleado", "admin"]
-                      .map((e) => DropdownMenuItem(value: e, child: Text(e)))
-                      .toList(),
-                  onChanged: (v) => setState(() => rolSel = v!),
-                  decoration: const InputDecoration(labelText: "Rol asignado"),
-                ),
-              ],
+              ),
             ),
           ),
           actions: [
@@ -1606,7 +1832,7 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
             ),
             ElevatedButton(
               onPressed: () async {
-                if (correoCtrl.text.contains('@')) {
+                if (_formKeyTrabajador.currentState?.validate() ?? false) {
                   await _dbService.preAutorizarTrabajador(
                     correo: correoCtrl.text.trim(),
                     nombre: nomCtrl.text.trim(),
@@ -1719,9 +1945,18 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
 
   void _mostrarDialogoNuevoPedido(
     BuildContext context,
-    String nombreCompleto, [
+    String nombreCompleto,
+    int sF,
+    int sC,
+    int bF,
+    int bC, [
     Pedido? pedido,
   ]) {
+    final int sDisp = (sF - sC).clamp(0, 999999);
+    final int bDisp = (bF - bC).clamp(0, 999999);
+    final bool sinStock = sDisp <= 0 || bDisp <= 0;
+    final bool isDark = Theme.of(context).brightness == Brightness.dark;
+
     final TextEditingController ticketController = TextEditingController(
       text: pedido?.ticket ?? "",
     );
@@ -1750,181 +1985,302 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
       builder: (context) => StatefulBuilder(
         // Para actualizar el diálogo internamente
         builder: (context, setState) => AlertDialog(
+          backgroundColor: sinStock
+              ? (isDark ? const Color(0xFF3D2C10) : Colors.orange.shade50)
+              : null,
           title: Text(pedido == null ? "Nuevo Pedido" : "Editar Pedido"),
-          content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                // --- SELECCIÓN DE CLIENTE ---
-                Container(
-                  padding: const EdgeInsets.all(10),
-                  decoration: BoxDecoration(
-                    color: Colors.cyan.withValues(alpha: 0.05),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(
-                      color: Colors.cyan.withValues(alpha: 0.2),
-                    ),
-                  ),
-                  child: Column(
-                    children: [
-                      Row(
-                        children: [
-                          const Icon(
-                            Icons.person_search,
-                            color: Colors.cyan,
-                            size: 20,
+          content: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 700),
+            child: Form(
+              key: _formKeyPedido,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (sinStock) ...[
+                      Container(
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: Colors.orange.withValues(alpha: 0.15),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                            color: Colors.orange.withValues(alpha: 0.5),
                           ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: Text(
-                              nombreClienteLabel,
-                              style: const TextStyle(
-                                fontSize: 13,
-                                fontWeight: FontWeight.bold,
+                        ),
+                        child: const Row(
+                          children: [
+                            Icon(
+                              Icons.warning_amber_rounded,
+                              color: Colors.orange,
+                              size: 20,
+                            ),
+                            SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                "TRABAJANDO SIN STOCK",
+                                style: TextStyle(
+                                  color: Colors.orange,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 13,
+                                ),
                               ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 30),
+                    ],
+                    // --- SELECCIÓN DE CLIENTE ---
+                    Container(
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: Colors.cyan.withValues(alpha: 0.05),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: Colors.cyan.withValues(alpha: 0.2),
+                        ),
+                      ),
+                      child: Column(
+                        children: [
+                          Row(
+                            children: [
+                              const Icon(
+                                Icons.person_search,
+                                color: Colors.cyan,
+                                size: 20,
+                              ),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Text(
+                                  nombreClienteLabel,
+                                  style: const TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 15),
+                          SizedBox(
+                            height: 40,
+                            child: StreamBuilder<QuerySnapshot>(
+                              stream: FirebaseFirestore.instance
+                                  .collection('Clientes')
+                                  .snapshots(),
+                              builder: (context, snap) {
+                                if (!snap.hasData) {
+                                  return const LinearProgressIndicator();
+                                }
+                                final clientes = snap.data!.docs;
+                                return DropdownButton<String>(
+                                  isExpanded: true,
+                                  value: idClienteSeleccionado,
+                                  hint: const Text(
+                                    "Elegir cliente",
+                                    style: TextStyle(fontSize: 12),
+                                  ),
+                                  underline: const SizedBox(),
+                                  items: clientes.map((c) {
+                                    final d = c.data() as Map<String, dynamic>;
+                                    if (c.id == idClienteSeleccionado &&
+                                        nombreClienteLabel ==
+                                            "Cargando cliente...") {
+                                      // Actualizamos la etiqueta del cliente si ya está cargado
+                                      // Nota: Esto ocurre durante el build, pero setState disparará otro build seguro.
+                                      Future.microtask(() {
+                                        if (context.mounted) {
+                                          setState(() {
+                                            nombreClienteLabel =
+                                                "Cliente: ${d['Nombre']} ${d['Apellido']}";
+                                          });
+                                        }
+                                      });
+                                    }
+                                    return DropdownMenuItem(
+                                      value: c.id,
+                                      child: Text(
+                                        "${d['Nombre']} ${d['Apellido']}",
+                                        style: const TextStyle(fontSize: 12),
+                                      ),
+                                    );
+                                  }).toList(),
+                                  onChanged: (val) {
+                                    final clienteDoc = clientes.firstWhere(
+                                      (c) => c.id == val,
+                                    );
+                                    final d =
+                                        clienteDoc.data()
+                                            as Map<String, dynamic>;
+                                    setState(() {
+                                      idClienteSeleccionado = val;
+                                      nombreClienteLabel =
+                                          "Cliente: ${d['Nombre']} ${d['Apellido']}";
+                                    });
+                                  },
+                                );
+                              },
                             ),
                           ),
                         ],
                       ),
-                      const SizedBox(height: 10),
-                      SizedBox(
-                        height: 40,
-                        child: StreamBuilder<QuerySnapshot>(
-                          stream: FirebaseFirestore.instance
-                              .collection('Clientes')
-                              .snapshots(),
-                          builder: (context, snap) {
-                            if (!snap.hasData) {
-                              return const LinearProgressIndicator();
-                            }
-                            final clientes = snap.data!.docs;
-                            return DropdownButton<String>(
-                              isExpanded: true,
-                              value: idClienteSeleccionado,
-                              hint: const Text(
-                                "Elegir cliente",
-                                style: TextStyle(fontSize: 12),
-                              ),
-                              underline: const SizedBox(),
-                              items: clientes.map((c) {
-                                final d = c.data() as Map<String, dynamic>;
-                                if (c.id == idClienteSeleccionado &&
-                                    nombreClienteLabel ==
-                                        "Cargando cliente...") {
-                                  // Actualizamos la etiqueta del cliente si ya está cargado
-                                  // Nota: Esto ocurre durante el build, pero setState disparará otro build seguro.
-                                  Future.microtask(() {
-                                    if (context.mounted) {
-                                      setState(() {
-                                        nombreClienteLabel =
-                                            "Cliente: ${d['Nombre']} ${d['Apellido']}";
-                                      });
-                                    }
-                                  });
-                                }
-                                return DropdownMenuItem(
-                                  value: c.id,
-                                  child: Text(
-                                    "${d['Nombre']} ${d['Apellido']}",
-                                    style: const TextStyle(fontSize: 12),
-                                  ),
-                                );
-                              }).toList(),
-                              onChanged: (val) {
-                                final clienteDoc = clientes.firstWhere(
-                                  (c) => c.id == val,
-                                );
-                                final d =
-                                    clienteDoc.data() as Map<String, dynamic>;
-                                setState(() {
-                                  idClienteSeleccionado = val;
-                                  nombreClienteLabel =
-                                      "Cliente: ${d['Nombre']} ${d['Apellido']}";
-                                });
-                              },
-                            );
-                          },
+                    ),
+                    const SizedBox(height: 30),
+                    TextFormField(
+                      controller: ticketController,
+                      decoration: const InputDecoration(
+                        labelText: "N° Ticket (Opcional)",
+                      ),
+                    ),
+                    const SizedBox(height: 30),
+                    // --- SELECCIÓN DE ORDEN ---
+                    DropdownButtonFormField<String>(
+                      key: ValueKey("orden_$ordenSeleccionada"),
+                      initialValue: ordenSeleccionada,
+                      decoration: const InputDecoration(labelText: "Orden"),
+                      items: ["Saco", "Bolsa", "Mixto"]
+                          .map(
+                            (e) => DropdownMenuItem(value: e, child: Text(e)),
+                          )
+                          .toList(),
+                      onChanged: (val) {
+                        if (val != null) {
+                          setState(() => ordenSeleccionada = val);
+                        }
+                      },
+                    ),
+
+                    // --- SECCIÓN DINÁMICA: SACO ---
+                    if (ordenSeleccionada == "Saco" ||
+                        ordenSeleccionada == "Mixto") ...[
+                      const SizedBox(height: 30),
+                      const Divider(),
+                      const SizedBox(height: 15),
+                      DropdownButtonFormField<String>(
+                        key: ValueKey("sub_saco_$subTipoSaco"),
+                        initialValue: subTipoSaco,
+                        decoration: const InputDecoration(
+                          labelText: "Tipo de Hielo (Saco)",
                         ),
+                        items: ["Saco Pescador", "Saco Público", "Donación"]
+                            .map(
+                              (e) => DropdownMenuItem(value: e, child: Text(e)),
+                            )
+                            .toList(),
+                        onChanged: (val) {
+                          if (val != null) {
+                            setState(() => subTipoSaco = val);
+                          }
+                        },
+                      ),
+                      const SizedBox(height: 30),
+                      TextFormField(
+                        controller: cantSacoCont,
+                        keyboardType: TextInputType.number,
+                        inputFormatters: [
+                          FilteringTextInputFormatter.digitsOnly,
+                        ],
+                        decoration: const InputDecoration(
+                          labelText: "Cantidad de Sacos",
+                        ),
+                        validator: (v) {
+                          if (v == null || v.isEmpty) {
+                            return "Campo obligatorio";
+                          }
+                          final int? valor = int.tryParse(v);
+                          if (valor == null) {
+                            return "Debe ser un número entero";
+                          }
+                          if (valor <= 0) {
+                            return "La cantidad debe ser mayor a cero";
+                          }
+                          return null;
+                        },
                       ),
                     ],
-                  ),
-                ),
-                const SizedBox(height: 15),
-                TextField(
-                  controller: ticketController,
-                  decoration: const InputDecoration(
-                    labelText: "N° Ticket (Referencia)",
-                  ),
-                ),
-                const SizedBox(height: 10),
-                // --- SELECCIÓN DE ORDEN ---
-                DropdownButtonFormField<String>(
-                  initialValue: ordenSeleccionada,
-                  decoration: const InputDecoration(labelText: "Orden"),
-                  items: ["Saco", "Bolsa", "Mixto"]
-                      .map((e) => DropdownMenuItem(value: e, child: Text(e)))
-                      .toList(),
-                  onChanged: (val) => setState(() => ordenSeleccionada = val!),
-                ),
 
-                // --- SECCIÓN DINÁMICA: SACO ---
-                if (ordenSeleccionada == "Saco" ||
-                    ordenSeleccionada == "Mixto") ...[
-                  const Divider(),
-                  DropdownButtonFormField<String>(
-                    initialValue: subTipoSaco,
-                    decoration: const InputDecoration(
-                      labelText: "Tipo de Hielo (Saco)",
-                    ),
-                    items: ["Saco Pescador", "Saco Público", "Donación"]
-                        .map((e) => DropdownMenuItem(value: e, child: Text(e)))
-                        .toList(),
-                    onChanged: (val) => setState(() => subTipoSaco = val),
-                  ),
-                  TextField(
-                    controller: cantSacoCont,
-                    keyboardType: TextInputType.number,
-                    decoration: const InputDecoration(
-                      labelText: "Cantidad de Sacos",
-                    ),
-                  ),
-                ],
+                    // --- SECCIÓN DINÁMICA: BOLSA ---
+                    if (ordenSeleccionada == "Bolsa" ||
+                        ordenSeleccionada == "Mixto") ...[
+                      const SizedBox(height: 30),
+                      const Divider(),
+                      const SizedBox(height: 15),
+                      DropdownButtonFormField<String>(
+                        key: ValueKey("sub_bolsa_$subTipoBolsa"),
+                        initialValue: subTipoBolsa,
+                        decoration: const InputDecoration(
+                          labelText: "Tipo de Hielo (Bolsa)",
+                        ),
+                        items: ["Bolsa Público", "Bolsa a Mayor", "Donación"]
+                            .map(
+                              (e) => DropdownMenuItem(value: e, child: Text(e)),
+                            )
+                            .toList(),
+                        onChanged: (val) {
+                          if (val != null) {
+                            setState(() => subTipoBolsa = val);
+                          }
+                        },
+                      ),
+                      const SizedBox(height: 30),
+                      TextFormField(
+                        controller: cantBolsaCont,
+                        keyboardType: TextInputType.number,
+                        inputFormatters: [
+                          FilteringTextInputFormatter.digitsOnly,
+                        ],
+                        decoration: const InputDecoration(
+                          labelText: "Cantidad de Bolsas",
+                        ),
+                        validator: (v) {
+                          if (v == null || v.isEmpty) {
+                            return "Campo obligatorio";
+                          }
+                          final int? valor = int.tryParse(v);
+                          if (valor == null) {
+                            return "Debe ser un número entero";
+                          }
+                          if (valor <= 0) {
+                            return "La cantidad debe ser mayor a cero";
+                          }
+                          return null;
+                        },
+                      ),
+                    ],
 
-                // --- SECCIÓN DINÁMICA: BOLSA ---
-                if (ordenSeleccionada == "Bolsa" ||
-                    ordenSeleccionada == "Mixto") ...[
-                  const Divider(),
-                  DropdownButtonFormField<String>(
-                    initialValue: subTipoBolsa,
-                    decoration: const InputDecoration(
-                      labelText: "Tipo de Hielo (Bolsa)",
+                    const SizedBox(height: 30),
+                    const Divider(),
+                    const SizedBox(height: 15),
+                    TextFormField(
+                      controller: montoController,
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
+                      inputFormatters: [
+                        FilteringTextInputFormatter.allow(
+                          RegExp(r'^\d+\.?\d{0,2}'),
+                        ),
+                      ],
+                      decoration: const InputDecoration(
+                        labelText: "Monto Total (Bs - Opcional)",
+                        prefixText: "Bs. ",
+                      ),
+                      validator: (value) {
+                        if (value == null || value.isEmpty) {
+                          return null; // Opcional, permitido vacío
+                        }
+                        // Reemplazamos coma por punto para el parsing si es necesario
+                        final v = value.replaceAll(',', '.');
+                        final double? parsed = double.tryParse(v);
+                        if (parsed == null || parsed < 0) {
+                          return 'Debe ser un número positivo (Ej: 15.50)';
+                        }
+                        return null;
+                      },
                     ),
-                    items: ["Bolsa Público", "Bolsa a Mayor", "Donación"]
-                        .map((e) => DropdownMenuItem(value: e, child: Text(e)))
-                        .toList(),
-                    onChanged: (val) => setState(() => subTipoBolsa = val),
-                  ),
-                  TextField(
-                    controller: cantBolsaCont,
-                    keyboardType: TextInputType.number,
-                    decoration: const InputDecoration(
-                      labelText: "Cantidad de Bolsas",
-                    ),
-                  ),
-                ],
-
-                const Divider(),
-                TextField(
-                  controller: montoController,
-                  keyboardType: const TextInputType.numberWithOptions(
-                    decimal: true,
-                  ),
-                  decoration: const InputDecoration(
-                    labelText: "Monto Total (Bs)",
-                    prefixText: "Bs. ",
-                  ),
+                  ],
                 ),
-              ],
+              ),
             ),
           ),
           actions: [
@@ -1934,58 +2290,66 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
             ),
             ElevatedButton(
               onPressed: () async {
-                final double monto =
-                    double.tryParse(montoController.text) ?? 0.0;
-                final int cantSaco = int.tryParse(cantSacoCont.text) ?? 0;
-                final int cantBolsa = int.tryParse(cantBolsaCont.text) ?? 0;
+                if (_formKeyPedido.currentState?.validate() ?? false) {
+                  final double monto =
+                      double.tryParse(montoController.text) ?? 0.0;
+                  final int cantSaco = int.tryParse(cantSacoCont.text) ?? 0;
+                  final int cantBolsa = int.tryParse(cantBolsaCont.text) ?? 0;
 
-                String categoriaFinal = "";
-                Map<String, int> mapaDescuento = {};
+                  String categoriaFinal = "";
+                  Map<String, int> mapaDescuento = {};
 
-                if (ordenSeleccionada == "Mixto") {
-                  categoriaFinal = "Mixto: $subTipoSaco + $subTipoBolsa";
-                  mapaDescuento = {
-                    "NZAtCFwTfLTwb3xiiOUk": cantSaco,
-                    "DWDbVnRf5nqGu8uTu3KA": cantBolsa,
-                  };
-                } else if (ordenSeleccionada == "Saco") {
-                  categoriaFinal = subTipoSaco!;
-                  mapaDescuento = {"NZAtCFwTfLTwb3xiiOUk": cantSaco};
-                } else {
-                  categoriaFinal = subTipoBolsa!;
-                  mapaDescuento = {"DWDbVnRf5nqGu8uTu3KA": cantBolsa};
-                }
+                  if (ordenSeleccionada == "Mixto") {
+                    categoriaFinal = "Mixto: $subTipoSaco + $subTipoBolsa";
+                    mapaDescuento = {
+                      "NZAtCFwTfLTwb3xiiOUk": cantSaco,
+                      "DWDbVnRf5nqGu8uTu3KA": cantBolsa,
+                    };
+                  } else if (ordenSeleccionada == "Saco") {
+                    categoriaFinal = subTipoSaco!;
+                    mapaDescuento = {"NZAtCFwTfLTwb3xiiOUk": cantSaco};
+                  } else {
+                    categoriaFinal = subTipoBolsa!;
+                    mapaDescuento = {"DWDbVnRf5nqGu8uTu3KA": cantBolsa};
+                  }
 
-                if (pedido == null) {
-                  await _dbService.crearPedidoYDescontar(
-                    categoriaHielo: categoriaFinal,
-                    monto: monto,
-                    ticket: ticketController.text,
-                    productosYCantidades: mapaDescuento,
-                    nombreCreador: nombreCompleto,
-                    idCliente: idClienteSeleccionado,
-                  );
-                } else {
-                  await _dbService.actualizarPedido(
-                    id: pedido.id,
-                    categoriaHielo: categoriaFinal,
-                    monto: monto,
-                    ticket: ticketController.text,
-                    productosYCantidades: mapaDescuento,
-                    nombreCreador: nombreCompleto,
-                    idCliente: idClienteSeleccionado,
-                    cantPrevia: {
-                      "NZAtCFwTfLTwb3xiiOUk": pedido.cantSaco,
-                      "DWDbVnRf5nqGu8uTu3KA": pedido.cantBolsa,
-                    },
-                  );
-                }
+                  if (pedido == null) {
+                    await _dbService.crearPedidoYDescontar(
+                      categoriaHielo: categoriaFinal,
+                      monto: monto,
+                      ticket: ticketController.text,
+                      productosYCantidades: mapaDescuento,
+                      nombreCreador: nombreCompleto,
+                      orden: ordenSeleccionada,
+                      detalleSaco: subTipoSaco,
+                      detalleBolsa: subTipoBolsa,
+                      idCliente: idClienteSeleccionado,
+                    );
+                  } else {
+                    await _dbService.actualizarPedido(
+                      id: pedido.id,
+                      categoriaHielo: categoriaFinal,
+                      monto: monto,
+                      ticket: ticketController.text,
+                      productosYCantidades: mapaDescuento,
+                      nombreCreador: nombreCompleto,
+                      orden: ordenSeleccionada,
+                      detalleSaco: subTipoSaco,
+                      detalleBolsa: subTipoBolsa,
+                      idCliente: idClienteSeleccionado,
+                      cantPrevia: {
+                        "NZAtCFwTfLTwb3xiiOUk": pedido.cantSaco,
+                        "DWDbVnRf5nqGu8uTu3KA": pedido.cantBolsa,
+                      },
+                    );
+                  }
 
-                if (context.mounted) {
-                  Navigator.pop(context);
-                  _notificarExito(
-                    "Pedido #${ticketController.text} guardado correctamente",
-                  );
+                  if (context.mounted) {
+                    Navigator.pop(context);
+                    _notificarExito(
+                      "Pedido #${ticketController.text} guardado correctamente",
+                    );
+                  }
                 }
               },
               child: const Text("Guardar Pedido"),
@@ -2028,13 +2392,21 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
 
   // MÉTODO PARA NOTIFICACIONES FLOTANTES EN LA PARTE SUPERIOR
   void _notificarExito(String mensaje) {
+    _mostrarMensaje(mensaje, esError: false);
+  }
+
+  void _mostrarMensaje(String mensaje, {bool esError = false}) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).hideCurrentSnackBar();
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Row(
           children: [
-            const Icon(Icons.check_circle, color: Colors.white, size: 20),
+            Icon(
+              esError ? Icons.cancel : Icons.check_circle,
+              color: Colors.white,
+              size: 20,
+            ),
             const SizedBox(width: 12),
             Expanded(
               child: Text(
@@ -2048,7 +2420,7 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
           ],
         ),
         behavior: SnackBarBehavior.floating,
-        backgroundColor: AppColors.primary,
+        backgroundColor: esError ? Colors.red : AppColors.primary,
         duration: const Duration(seconds: 3),
         margin: EdgeInsets.only(
           bottom: MediaQuery.of(context).size.height - 140,
@@ -2061,52 +2433,18 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
     );
   }
 
-  void _confirmarAccion({
-    required BuildContext context,
-    required String titulo,
-    required String mensaje,
-    required Color colorBoton,
-    required String textoBoton,
-    required VoidCallback onConfirm,
-  }) {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text(titulo, style: const TextStyle(color: AppColors.primary)),
-        content: Text(mensaje),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text("Atrás"),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              Navigator.pop(context);
-              onConfirm();
-            },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: colorBoton,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(10),
-              ),
-            ),
-            child: Text(
-              textoBoton,
-              style: const TextStyle(color: Colors.white),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
   void _mostrarDetalleCompleto(
     BuildContext context,
     Pedido pedido,
     String rolActual,
     String nombreCompleto,
+    int sF,
+    int sC,
+    int bF,
+    int bC,
   ) {
+    final bool isDark = Theme.of(context).brightness == Brightness.dark;
+
     showModalBottomSheet(
       context: context,
       shape: const RoundedRectangleBorder(
@@ -2124,7 +2462,7 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
                     width: 50,
                     height: 5,
                     decoration: BoxDecoration(
-                      color: Colors.grey[300],
+                      color: isDark ? Colors.grey[700] : Colors.grey[300],
                       borderRadius: BorderRadius.circular(10),
                     ),
                   ),
@@ -2135,33 +2473,48 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
                   style: TextStyle(
                     fontSize: 20,
                     fontWeight: FontWeight.bold,
-                    color: Colors.blue[900],
+                    color: isDark ? Colors.white : Colors.blue[900],
                   ),
                 ),
                 const Divider(),
                 _filaDetalle(
+                  context,
                   Icons.confirmation_number,
                   "N° Ticket",
                   pedido.ticket,
                 ),
-                _filaDetalle(Icons.ac_unit, "Tipo de Hielo", pedido.tipoHielo),
                 _filaDetalle(
+                  context,
+                  Icons.ac_unit,
+                  "Tipo de Hielo",
+                  pedido.tipoHielo,
+                ),
+                _filaDetalle(
+                  context,
                   Icons.attach_money,
                   "Monto Total",
                   "${pedido.monto} Bs",
                 ),
-                _filaDetalle(Icons.info, "Estado Actual", pedido.estado),
                 _filaDetalle(
+                  context,
+                  Icons.info,
+                  "Estado Actual",
+                  pedido.estado,
+                ),
+                _filaDetalle(
+                  context,
                   Icons.person_add,
                   "Creado por",
                   pedido.creadoPor ?? "N/A",
                 ),
                 _filaDetalle(
+                  context,
                   Icons.local_shipping,
                   "Despachado por",
                   pedido.despachadoPor ?? "Pendiente",
                 ),
                 _filaDetalle(
+                  context,
                   Icons.calendar_today,
                   "Fecha y Hora",
                   pedido.fecha?.toString() ?? "N/A",
@@ -2180,6 +2533,10 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
                         _mostrarDialogoNuevoPedido(
                           context,
                           nombreCompleto,
+                          sF,
+                          sC,
+                          bF,
+                          bC,
                           pedido,
                         );
                       },
@@ -2194,55 +2551,96 @@ class _PanelPrincipalState extends State<PanelPrincipal> {
   }
 
   // Widget auxiliar para las filas del modal
-  Widget _filaDetalle(IconData icono, String titulo, String valor) {
+  Widget _filaDetalle(
+    BuildContext context,
+    IconData icono,
+    String titulo,
+    String valor,
+  ) {
+    final bool isDark = Theme.of(context).brightness == Brightness.dark;
+
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 8),
       child: Row(
         children: [
-          Icon(icono, color: Colors.blueGrey, size: 20),
+          Icon(
+            icono,
+            color: isDark ? Colors.blueGrey[200] : Colors.blueGrey,
+            size: 20,
+          ),
           const SizedBox(width: 10),
           Text(
             "$titulo: ",
-            style: const TextStyle(fontWeight: FontWeight.bold),
+            style: TextStyle(
+              fontWeight: FontWeight.bold,
+              color: isDark ? Colors.white : Colors.black87,
+            ),
           ),
           Expanded(
-            child: Text(valor, style: const TextStyle(color: Colors.black87)),
+            child: Text(
+              valor,
+              style: TextStyle(color: isDark ? Colors.white70 : Colors.black87),
+            ),
           ),
         ],
       ),
     );
   }
-}
 
-class _SliverAppBarDelegate extends SliverPersistentHeaderDelegate {
-  _SliverAppBarDelegate({
-    required this.minHeight,
-    required this.maxHeight,
-    required this.child,
-  });
-  final double minHeight;
-  final double maxHeight;
-  final Widget child;
-
-  @override
-  double get minExtent => minHeight;
-  @override
-  double get maxExtent => maxHeight;
-
-  @override
-  Widget build(
+  Future<bool?> _mostrarDialogoConfirmacion(
     BuildContext context,
-    double shrinkOffset,
-    bool overlapsContent,
+    String titulo,
+    String mensaje,
+    Color colorPrimario,
   ) {
-    return SizedBox.expand(child: child);
-  }
-
-  @override
-  bool shouldRebuild(_SliverAppBarDelegate oldDelegate) {
-    return maxHeight != oldDelegate.maxHeight ||
-        minHeight != oldDelegate.minHeight ||
-        child != oldDelegate.child;
+    return showDialog<bool>(
+      context: context,
+      builder: (context) {
+        final bool isDark = Theme.of(context).brightness == Brightness.dark;
+        return BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
+          child: AlertDialog(
+            backgroundColor: isDark ? const Color(0xFF1E1E1E) : Colors.white,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20),
+            ),
+            title: Text(
+              titulo,
+              style: TextStyle(
+                color: colorPrimario,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            content: Text(
+              mensaje,
+              style: TextStyle(color: isDark ? Colors.white70 : Colors.black87),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: Text(
+                  "Volver",
+                  style: TextStyle(
+                    color: isDark ? Colors.white54 : Colors.grey,
+                  ),
+                ),
+              ),
+              ElevatedButton(
+                onPressed: () => Navigator.pop(context, true),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppColors.secondary,
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                child: const Text("Confirmar"),
+              ),
+            ],
+          ),
+        );
+      },
+    );
   }
 }
 
@@ -2255,244 +2653,271 @@ class _EstadisticasScreen extends StatefulWidget {
 }
 
 class _EstadisticasScreenState extends State<_EstadisticasScreen> {
-  double _ventasDia = 0;
-  double _ventasMes = 0;
-  List<BarChartGroupData> _barGroups = [];
-  List<Map<String, dynamic>> _topClientes = [];
-  bool _isLoading = true;
-
-  @override
-  void initState() {
-    super.initState();
-    _cargarEstadisticas();
-  }
-
-  Future<void> _cargarEstadisticas() async {
-    setState(() => _isLoading = true);
-    final ahora = DateTime.now();
-
-    // 1. Ventas del Día
-    final inicioDia = DateTime(ahora.year, ahora.month, ahora.day);
-    final snapDia = await FirebaseFirestore.instance
-        .collection('Pedidos')
-        .where('estado', whereIn: ['Despachado', 'Entregado'])
-        .where('fecha', isGreaterThanOrEqualTo: Timestamp.fromDate(inicioDia))
-        .get();
-
-    double totalDia = 0;
-    for (var doc in snapDia.docs) {
-      totalDia += (doc.data()['Monto_total'] ?? 0).toDouble();
-    }
-
-    // 2. Ventas del Mes
-    final inicioMes = DateTime(ahora.year, ahora.month, 1);
-    final snapMes = await FirebaseFirestore.instance
-        .collection('Pedidos')
-        .where('estado', whereIn: ['Despachado', 'Entregado'])
-        .where('fecha', isGreaterThanOrEqualTo: Timestamp.fromDate(inicioMes))
-        .get();
-
-    double totalMes = 0;
-    for (var doc in snapMes.docs) {
-      totalMes += (doc.data()['Monto_total'] ?? 0).toDouble();
-    }
-
-    // 3. Gráfica 7 días
-    List<BarChartGroupData> groups = [];
-    for (int i = 6; i >= 0; i--) {
-      final diaBusqueda = ahora.subtract(Duration(days: i));
-      final inicio = DateTime(
-        diaBusqueda.year,
-        diaBusqueda.month,
-        diaBusqueda.day,
-      );
-      final fin = inicio.add(const Duration(days: 1));
-
-      final snap = await FirebaseFirestore.instance
-          .collection('Pedidos')
-          .where('estado', whereIn: ['Despachado', 'Entregado'])
-          .where('fecha', isGreaterThanOrEqualTo: Timestamp.fromDate(inicio))
-          .where('fecha', isLessThan: Timestamp.fromDate(fin))
-          .get();
-
-      double sumaDia = 0;
-      for (var doc in snap.docs) {
-        sumaDia += (doc.data()['Monto_total'] ?? 0).toDouble();
-      }
-
-      groups.add(
-        BarChartGroupData(
-          x: 6 - i,
-          barRods: [
-            BarChartRodData(
-              toY: sumaDia,
-              color: AppColors.secondary,
-              width: 15,
-              borderRadius: BorderRadius.circular(4),
-            ),
-          ],
-        ),
-      );
-    }
-
-    // 4. Top Clientes (Usando snapMes para una muestra relevante)
-    Map<String, int> conteoClientes = {};
-    for (var doc in snapMes.docs) {
-      final idC = doc.data()['id_cliente'];
-      if (idC != null) {
-        conteoClientes[idC] = (conteoClientes[idC] ?? 0) + 1;
-      }
-    }
-
-    List<Map<String, dynamic>> topList = [];
-    var sortedEntries = conteoClientes.entries.toList()
-      ..sort((a, b) => b.value.compareTo(a.value));
-
-    for (var entry in sortedEntries.take(5)) {
-      final clientDoc = await FirebaseFirestore.instance
-          .collection('Clientes')
-          .doc(entry.key)
-          .get();
-      if (clientDoc.exists) {
-        final d = clientDoc.data()!;
-        topList.add({
-          'nombre': "${d['Nombre']} ${d['Apellido']}",
-          'compras': entry.value,
-        });
-      }
-    }
-
-    if (mounted) {
-      setState(() {
-        _ventasDia = totalDia;
-        _ventasMes = totalMes;
-        _barGroups = groups;
-        _topClientes = topList;
-        _isLoading = false;
-      });
-    }
-  }
+  String _filtroEstadisticas = "Semana";
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text("Dashboard de Ventas"),
-        actions: [
-          IconButton(
-            onPressed: _cargarEstadisticas,
-            icon: const Icon(Icons.refresh_rounded),
-          ),
-        ],
-      ),
-      body: _isLoading
-          ? const Center(child: CircularProgressIndicator())
-          : ListView(
-              padding: const EdgeInsets.all(20),
-              children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: _buildStatCard(
-                        "Hoy",
-                        "${_ventasDia.toStringAsFixed(2)} Bs",
-                        Colors.green,
-                      ),
+      appBar: AppBar(title: const Text("Dashboard de Ventas")),
+      body: StreamBuilder<List<Pedido>>(
+        stream: widget.dbService.streamVentasFiltradas(_filtroEstadisticas),
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          final pedidos = snapshot.data ?? [];
+          double totalMonto = 0;
+          final Map<String, int> volumenVentas = {};
+
+          for (var p in pedidos) {
+            totalMonto += p.monto;
+            final fecha = p.fecha ?? DateTime.now();
+            String key = _getLabelPorFiltro(fecha, _filtroEstadisticas);
+            volumenVentas[key] = (volumenVentas[key] ?? 0) + 1;
+          }
+
+          final List<String> labels = _getLabelsOrdenados(_filtroEstadisticas);
+          final List<BarChartGroupData> barGroups = [];
+          int maxVolumen = 0;
+          for (int i = 0; i < labels.length; i++) {
+            final count = volumenVentas[labels[i]] ?? 0;
+            if (count > maxVolumen) maxVolumen = count;
+            barGroups.add(
+              BarChartGroupData(
+                x: i,
+                barRods: [
+                  BarChartRodData(
+                    toY: count.toDouble(),
+                    color: AppColors.secondary,
+                    width: 16,
+                    borderRadius: const BorderRadius.vertical(
+                      top: Radius.circular(4),
                     ),
-                    const SizedBox(width: 15),
-                    Expanded(
-                      child: _buildStatCard(
-                        "Mes",
-                        "${_ventasMes.toStringAsFixed(2)} Bs",
-                        Colors.blue,
-                      ),
+                  ),
+                ],
+              ),
+            );
+          }
+
+          return ListView(
+            padding: const EdgeInsets.all(20),
+            children: [
+              SegmentedButton<String>(
+                segments: const [
+                  ButtonSegment(value: 'Día', label: Text('Hoy')),
+                  ButtonSegment(value: 'Semana', label: Text('Sem')),
+                  ButtonSegment(value: 'Mes', label: Text('Mes')),
+                  ButtonSegment(value: 'Año', label: Text('Año')),
+                ],
+                selected: {_filtroEstadisticas},
+                onSelectionChanged: (Set<String> newSelection) {
+                  setState(() {
+                    _filtroEstadisticas = newSelection.first;
+                  });
+                },
+                style: SegmentedButton.styleFrom(
+                  selectedBackgroundColor: AppColors.secondary,
+                  selectedForegroundColor: Colors.white,
+                ),
+              ),
+              const SizedBox(height: 30),
+              _buildGananciasCard(totalMonto, _filtroEstadisticas),
+              const SizedBox(height: 30),
+              const Text(
+                "Volumen de Pedidos",
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  color: AppColors.primary,
+                ),
+              ),
+              const SizedBox(height: 20),
+              Container(
+                height: 300,
+                padding: const EdgeInsets.all(15),
+                decoration: BoxDecoration(
+                  color: Theme.of(context).cardColor,
+                  borderRadius: BorderRadius.circular(20),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.05),
+                      blurRadius: 10,
                     ),
                   ],
                 ),
-                const SizedBox(height: 25),
-                const Text(
-                  "Ventas Úitimos 7 Días",
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                ),
-                const SizedBox(height: 20),
-                Container(
-                  height: 250,
-                  padding: const EdgeInsets.all(15),
-                  decoration: BoxDecoration(
-                    color: Theme.of(context).cardColor,
-                    borderRadius: BorderRadius.circular(20),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withValues(alpha: 0.05),
-                        blurRadius: 10,
+                child: BarChart(
+                  BarChartData(
+                    alignment: BarChartAlignment.spaceAround,
+                    maxY: (maxVolumen + 2).toDouble(),
+                    barGroups: barGroups,
+                    gridData: const FlGridData(show: false),
+                    borderData: FlBorderData(show: false),
+                    titlesData: FlTitlesData(
+                      leftTitles: const AxisTitles(
+                        sideTitles: SideTitles(showTitles: false),
                       ),
-                    ],
-                  ),
-                  child: BarChart(
-                    BarChartData(
-                      barGroups: _barGroups,
-                      borderData: FlBorderData(show: false),
-                      titlesData: const FlTitlesData(
-                        show: true,
-                        topTitles: AxisTitles(
-                          sideTitles: SideTitles(showTitles: false),
-                        ),
-                        rightTitles: AxisTitles(
-                          sideTitles: SideTitles(showTitles: false),
+                      topTitles: const AxisTitles(
+                        sideTitles: SideTitles(showTitles: false),
+                      ),
+                      rightTitles: const AxisTitles(
+                        sideTitles: SideTitles(showTitles: false),
+                      ),
+                      bottomTitles: AxisTitles(
+                        sideTitles: SideTitles(
+                          showTitles: true,
+                          getTitlesWidget: (val, meta) => Text(
+                            val.toInt() < labels.length
+                                ? labels[val.toInt()]
+                                : '',
+                            style: const TextStyle(fontSize: 10),
+                          ),
                         ),
                       ),
                     ),
                   ),
                 ),
-                const SizedBox(height: 30),
-                const Text(
-                  "Top 5 Clientes (Mes)",
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                ),
-                const SizedBox(height: 15),
-                ..._topClientes.map(
-                  (c) => Card(
-                    child: ListTile(
-                      leading: const CircleAvatar(child: Icon(Icons.person)),
-                      title: Text(c['nombre']),
-                      trailing: Text(
-                        "${c['compras']} compras",
-                        style: const TextStyle(
-                          fontWeight: FontWeight.bold,
-                          color: AppColors.secondary,
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
+              ),
+            ],
+          );
+        },
+      ),
     );
   }
 
-  Widget _buildStatCard(String title, String value, Color color) {
+  // --- MÉTODOS AUXILIARES MOVIDOS ---
+  Widget _buildGananciasCard(double monto, String filtro) {
     return Container(
-      padding: const EdgeInsets.all(20),
+      padding: const EdgeInsets.all(25),
       decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.1),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: color.withValues(alpha: 0.3)),
+        gradient: const LinearGradient(
+          colors: [AppColors.primary, Color(0xFF1A3A5A)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(25),
+        boxShadow: [
+          BoxShadow(
+            color: AppColors.primary.withValues(alpha: 0.3),
+            blurRadius: 15,
+            offset: const Offset(0, 8),
+          ),
+        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            title,
-            style: TextStyle(color: color, fontWeight: FontWeight.bold),
+          Row(
+            children: [
+              const Icon(
+                Icons.account_balance_wallet,
+                color: Colors.cyanAccent,
+              ),
+              const SizedBox(width: 10),
+              Text(
+                "Ganancias ($filtro)",
+                style: const TextStyle(color: Colors.white70, fontSize: 16),
+              ),
+            ],
           ),
-          const SizedBox(height: 10),
+          const SizedBox(height: 15),
           Text(
-            value,
-            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            "${monto.toStringAsFixed(2)} Bs.",
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 32,
+              fontWeight: FontWeight.bold,
+            ),
           ),
         ],
       ),
     );
+  }
+
+  String _getLabelPorFiltro(DateTime fecha, String filtro) {
+    if (filtro == 'Día') {
+      return "${fecha.hour}h";
+    } else if (filtro == 'Semana') {
+      return _getDiaNombreTab(0, customDate: fecha);
+    } else if (filtro == 'Mes') {
+      return "Dia ${fecha.day}";
+    } else {
+      switch (fecha.month) {
+        case 1:
+          return "Ene";
+        case 2:
+          return "Feb";
+        case 3:
+          return "Mar";
+        case 4:
+          return "Abr";
+        case 5:
+          return "May";
+        case 6:
+          return "Jun";
+        case 7:
+          return "Jul";
+        case 8:
+          return "Ago";
+        case 9:
+          return "Sep";
+        case 10:
+          return "Oct";
+        case 11:
+          return "Nov";
+        case 12:
+          return "Dic";
+        default:
+          return "";
+      }
+    }
+  }
+
+  List<String> _getLabelsOrdenados(String filtro) {
+    if (filtro == 'Día') {
+      return List.generate(24, (i) => "${i}h");
+    } else if (filtro == 'Semana') {
+      return ["Lun", "Mar", "Mie", "Jue", "Vie", "Sab", "Dom"];
+    } else if (filtro == 'Mes') {
+      return List.generate(31, (i) => "Dia ${i + 1}");
+    } else {
+      return [
+        "Ene",
+        "Feb",
+        "Mar",
+        "Abr",
+        "May",
+        "Jun",
+        "Jul",
+        "Ago",
+        "Sep",
+        "Oct",
+        "Nov",
+        "Dic",
+      ];
+    }
+  }
+
+  String _getDiaNombreTab(int index, {DateTime? customDate}) {
+    final ahora = DateTime.now();
+    final dia = customDate ?? ahora.subtract(Duration(days: 6 - index));
+    switch (dia.weekday) {
+      case 1:
+        return "Lun";
+      case 2:
+        return "Mar";
+      case 3:
+        return "Mie";
+      case 4:
+        return "Jue";
+      case 5:
+        return "Vie";
+      case 6:
+        return "Sab";
+      case 7:
+        return "Dom";
+      default:
+        return "";
+    }
   }
 }
 
@@ -2606,7 +3031,7 @@ class _BitacoraScreenState extends State<BitacoraScreen> {
 
           // --- LISTADO DE EVENTOS ---
           Expanded(
-            child: StreamBuilder<QuerySnapshot>(
+            child: StreamBuilder<List<QueryDocumentSnapshot>>(
               stream: _dbService.streamBitacora(
                 filtroNombre: _filtroNombre,
                 filtroCorreo: _filtroCorreo,
@@ -2656,7 +3081,7 @@ class _BitacoraScreenState extends State<BitacoraScreen> {
                   return const Center(child: CircularProgressIndicator());
                 }
 
-                final eventos = snapshot.data?.docs ?? [];
+                final eventos = snapshot.data ?? [];
 
                 if (eventos.isEmpty) {
                   return const Center(
@@ -2672,6 +3097,18 @@ class _BitacoraScreenState extends State<BitacoraScreen> {
                     final data = eventos[index].data() as Map<String, dynamic>;
                     final DateTime? fecha = (data['fecha'] as Timestamp?)
                         ?.toDate();
+                    final String motivo = data['motivo'] ?? 'No especificado';
+                    final String? tipoMovimiento = data['tipo_movimiento'];
+
+                    // Determinar color del chip según tipo de movimiento
+                    Color chipColor;
+                    if (tipoMovimiento == 'ENTRADA') {
+                      chipColor = Colors.green;
+                    } else if (tipoMovimiento == 'SALIDA') {
+                      chipColor = Colors.orange;
+                    } else {
+                      chipColor = Colors.grey;
+                    }
 
                     return ListTile(
                       leading: CircleAvatar(
@@ -2689,6 +3126,47 @@ class _BitacoraScreenState extends State<BitacoraScreen> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(data['detalle'] ?? 'Sin detalle'),
+                          const SizedBox(height: 6),
+                          // Chip del motivo
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 4,
+                            ),
+                            decoration: BoxDecoration(
+                              color: chipColor.withValues(alpha: 0.1),
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(
+                                color: chipColor.withValues(alpha: 0.3),
+                              ),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  tipoMovimiento == 'ENTRADA'
+                                      ? Icons.arrow_downward
+                                      : tipoMovimiento == 'SALIDA'
+                                      ? Icons.arrow_upward
+                                      : Icons.info_outline,
+                                  size: 12,
+                                  color: chipColor,
+                                ),
+                                const SizedBox(width: 4),
+                                Flexible(
+                                  child: Text(
+                                    'Motivo: $motivo',
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      color: chipColor,
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
                           const SizedBox(height: 4),
                           Text(
                             "Por: ${data['nombre_usuario'] ?? 'Usuario'} (${data['usuario'] ?? 'Email'})",
@@ -2710,7 +3188,6 @@ class _BitacoraScreenState extends State<BitacoraScreen> {
                           color: Colors.grey,
                         ),
                       ),
-                      isThreeLine: true,
                     );
                   },
                 );
@@ -2755,7 +3232,15 @@ class _EscritorioView extends StatelessWidget {
     return Scaffold(
       body: Row(
         children: [
-          if (!esInvitado) parent._buildNavigationRail(context, nombreCompleto),
+          if (!esInvitado)
+            parent._buildNavigationRail(
+              context,
+              nombreCompleto,
+              sacoFisico,
+              sacoComp,
+              bolsaFisico,
+              bolsaComp,
+            ),
           Expanded(
             child: parent._buildMainContent(
               nombreCompleto: nombreCompleto,
@@ -2816,11 +3301,13 @@ class _MovilView extends StatelessWidget {
             ),
             onPressed: onToggleTheme,
           ),
+          IconButton(
+            icon: const Icon(Icons.logout, color: Colors.white),
+            onPressed: () => parent._mostrarConfirmacionLogout(context),
+          ),
         ],
       ),
-      drawer: esInvitado
-          ? null
-          : parent._buildDrawer(context, nombreCompleto, rolActual),
+      drawer: null,
       body: parent._buildMainContent(
         nombreCompleto: nombreCompleto,
         rolActual: rolActual,
@@ -2840,8 +3327,14 @@ class _MovilView extends StatelessWidget {
               backgroundColor: AppColors.secondary,
             )
           : FloatingActionButton(
-              onPressed: () =>
-                  parent._mostrarDialogoNuevoPedido(context, nombreCompleto),
+              onPressed: () => parent._mostrarDialogoNuevoPedido(
+                context,
+                nombreCompleto,
+                sacoFisico,
+                sacoComp,
+                bolsaFisico,
+                bolsaComp,
+              ),
               backgroundColor: AppColors.secondary,
               elevation: 4,
               shape: const CircleBorder(),
@@ -2849,8 +3342,201 @@ class _MovilView extends StatelessWidget {
             ),
       floatingActionButtonLocation: esInvitado
           ? FloatingActionButtonLocation.centerFloat
-          : FloatingActionButtonLocation.centerDocked,
+          : FloatingActionButtonLocation.endFloat,
       bottomNavigationBar: esInvitado ? null : parent._buildBottomNav(context),
     );
   }
+}
+
+class _DynamicInventoryHeaderDelegate extends SliverPersistentHeaderDelegate {
+  final int sacoFisico, sacoComp, bolsaFisico, bolsaComp;
+  final bool esInvitado;
+  final String nombreCompleto;
+  final Function(BuildContext context, String id, int cantidad, String motivo)
+  onAjustar;
+
+  _DynamicInventoryHeaderDelegate({
+    required this.sacoFisico,
+    required this.sacoComp,
+    required this.bolsaFisico,
+    required this.bolsaComp,
+    required this.esInvitado,
+    required this.nombreCompleto,
+    required this.onAjustar,
+  });
+
+  @override
+  double get maxExtent => 320.0; // Reducido aún más para eliminar "aire" innecesario
+
+  Widget _buildMiniInfo(String label, int val, Color color) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          "$label: ",
+          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+        ),
+        Text(
+          val.toString(),
+          style: TextStyle(
+            color: color,
+            fontWeight: FontWeight.w900,
+            fontSize: 16,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildAlertaBadge(String mensaje) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: Colors.red[900]?.withValues(alpha: 0.9),
+        borderRadius: BorderRadius.circular(15),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.red.withValues(alpha: 0.2),
+            blurRadius: 8,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.report_problem, color: Colors.white, size: 16),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              mensaje,
+              style: const TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+                fontSize: 12,
+              ),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(
+    BuildContext context,
+    double shrinkOffset,
+    bool overlapsContent,
+  ) {
+    final double percent = (shrinkOffset / maxExtent).clamp(0.0, 1.0);
+    final bool isDark = Theme.of(context).brightness == Brightness.dark;
+
+    return ClipRRect(
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+        child: Container(
+          decoration: BoxDecoration(
+            color: isDark
+                ? Colors.white.withValues(alpha: percent > 0.5 ? 0.05 : 0.02)
+                : Colors.white.withValues(alpha: percent > 0.5 ? 0.9 : 0.7),
+            border: Border(
+              bottom: BorderSide(
+                color: isDark
+                    ? Colors.white.withValues(alpha: 0.1)
+                    : Colors.black.withValues(alpha: 0.05),
+              ),
+            ),
+          ),
+          child: Stack(
+            children: [
+              // --- ESTADO EXPANDIDO (Con alertas integradas) ---
+              Positioned.fill(
+                child: Opacity(
+                  opacity: (1.0 - percent * 2.5).clamp(0.0, 1.0),
+                  child: SingleChildScrollView(
+                    physics: const NeverScrollableScrollPhysics(),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 4,
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        // Cálculo de alerta dentro del delegado
+                        if ((sacoFisico - sacoComp) <= 0 ||
+                            (bolsaFisico - bolsaComp) <= 0) ...[
+                          _buildAlertaBadge("TRABAJANDO SIN STOCK"),
+                          const SizedBox(height: 8),
+                        ],
+                        comp.InventarioResumenCard(
+                          sacoFisico: sacoFisico,
+                          sacoComp: sacoComp,
+                          bolsaFisico: bolsaFisico,
+                          bolsaComp: bolsaComp,
+                          readOnly: esInvitado,
+                          onAjustar: onAjustar,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+
+              // --- ESTADO COLAPSADO (Dot indicador de alerta) ---
+              Opacity(
+                opacity: (percent * 2.0 - 1.0).clamp(0.0, 1.0),
+                child: Center(
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      // Indicador minimalista de alerta en modo colapsado
+                      if ((sacoFisico - sacoComp) <= 0 ||
+                          (bolsaFisico - bolsaComp) <= 0) ...[
+                        Container(
+                          width: 8,
+                          height: 8,
+                          decoration: const BoxDecoration(
+                            color: Colors.red,
+                            shape: BoxShape.circle,
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                      ],
+                      _buildMiniInfo(
+                        "S",
+                        sacoFisico - sacoComp,
+                        AppColors.secondary,
+                      ),
+                      const SizedBox(width: 25),
+                      Container(
+                        width: 1,
+                        height: 20,
+                        color: isDark ? Colors.white24 : Colors.black12,
+                      ),
+                      const SizedBox(width: 25),
+                      _buildMiniInfo(
+                        "B",
+                        bolsaFisico - bolsaComp,
+                        AppColors.secondary,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  double get minExtent => 60.0;
+
+  @override
+  bool shouldRebuild(covariant SliverPersistentHeaderDelegate oldDelegate) =>
+      true;
 }

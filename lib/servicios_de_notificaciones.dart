@@ -4,10 +4,8 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'dart:io' show Platform;
-import 'dart:convert';
-
 // Imports para la nueva API v1
-import 'package:googleapis_auth/auth_io.dart' as auth;
+// import 'package:googleapis_auth/auth_io.dart' as auth;
 // a importación http ya no es necesaria con la API v1
 // import 'package:http/http.dart' as http;
 
@@ -27,10 +25,10 @@ class NotificationService {
       final notification = message.notification;
       if (notification != null && (Platform.isAndroid || Platform.isIOS)) {
         _flutterLocalNotificationsPlugin.show(
-          notification.hashCode,
-          notification.title,
-          notification.body,
-          const NotificationDetails(
+          id: notification.hashCode,
+          title: notification.title,
+          body: notification.body,
+          notificationDetails: const NotificationDetails(
             android: AndroidNotificationDetails(
               'stock_alerts_channel',
               'Alertas de Stock',
@@ -107,6 +105,8 @@ class NotificationService {
           android: initializationSettingsAndroid,
           iOS: initializationSettingsIOS,
         );
-    await _flutterLocalNotificationsPlugin.initialize(initializationSettings);
+    await _flutterLocalNotificationsPlugin.initialize(
+      settings: initializationSettings,
+    );
   }
 }

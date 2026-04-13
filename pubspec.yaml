@@ -44,6 +44,8 @@ dependencies:
   http: ^1.6.0
   google_fonts: ^6.2.1
   phosphor_flutter: ^2.1.0
+  flutter_local_notifications: ^21.0.0
+  googleapis_auth: ^2.0.0
   #googleapis_auth: ^2.0.0
 
 dev_dependencies:

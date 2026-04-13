@@ -68,8 +68,8 @@ class Pedido {
       idCliente: data['id_cliente']?.toString(),
       orden:
           infoHielo['orden']?.toString() ?? 'Saco', // Valor por defecto sensato
-      detalleSaco: infoHielo['detalle_saco']?.toString() ?? 'Estándar',
-      detalleBolsa: infoHielo['detalle_bolsa']?.toString() ?? 'Estándar',
+      detalleSaco: infoHielo['detalle_saco']?.toString() ?? 'Saco Público',
+      detalleBolsa: infoHielo['detalle_bolsa']?.toString() ?? 'Bolsa Público',
     );
   }
 }
@@ -102,11 +102,23 @@ class Cita {
 
   factory Cita.fromFirestore(DocumentSnapshot doc) {
     final data = doc.data() as Map<String, dynamic>;
+    DateTime fechaValidada = DateTime.now();
+    try {
+      final rawFecha = data['fecha'];
+      if (rawFecha is Timestamp) {
+        fechaValidada = rawFecha.toDate();
+      } else if (rawFecha is String) {
+        fechaValidada = DateTime.tryParse(rawFecha) ?? DateTime.now();
+      }
+    } catch (_) {
+      // Fallback a DateTime.now() en caso de error
+    }
+
     return Cita(
       id: doc.id,
       nombre: data['nombre'] ?? '',
       motivo: data['motivo'] ?? '',
-      fecha: (data['fecha'] as Timestamp?)?.toDate() ?? DateTime.now(),
+      fecha: fechaValidada,
       slot: data['slot'] ?? '',
       idPedido: data['id_pedido'],
       idCliente: data['id_cliente'],
@@ -114,5 +126,12 @@ class Cita {
       colorEtiqueta: data['color_etiqueta'] ?? "#FFA500",
       estadoAgendado: data['estado_agendado'] ?? false,
     );
+  }
+
+  /// Verifica si la cita debe marcarse como completada basándose en el estado del pedido.
+  bool debeMarcarseComoCompletada(String? estadoPedido) {
+    if (idPedido == null || estadoPedido == null) return false;
+    // Si el pedido está 'Despachado' y la cita no está 'Completada', debe actualizarse.
+    return estadoPedido == 'Despachado' && !estadoAgendado;
   }
 }

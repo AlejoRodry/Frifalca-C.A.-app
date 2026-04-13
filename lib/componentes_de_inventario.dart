@@ -87,7 +87,7 @@ class PedidoCard extends StatelessWidget {
 
     return Card(
       elevation: 1,
-      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       child: InkWell(
         onTap: onTap,
@@ -95,12 +95,7 @@ class PedidoCard extends StatelessWidget {
         child: Container(
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(12),
-            border: Border(
-              left: BorderSide(
-                color: colorEstado,
-                width: 5,
-              ),
-            ),
+            border: Border(left: BorderSide(color: colorEstado, width: 5)),
           ),
           child: Padding(
             padding: const EdgeInsets.all(12.0),
@@ -153,7 +148,8 @@ class InventarioResumenCard extends StatelessWidget {
   final int sacoComp;
   final int bolsaFisico;
   final int bolsaComp;
-  final Function(String id, int cantidad) onAjustar;
+  final Function(BuildContext context, String id, int cantidad, String motivo)
+  onAjustar;
   final bool readOnly;
 
   const InventarioResumenCard({
@@ -196,8 +192,9 @@ class InventarioResumenCard extends StatelessWidget {
         ],
       ),
       child: Padding(
-        padding: const EdgeInsets.all(30),
+        padding: const EdgeInsets.all(20),
         child: Column(
+          mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
@@ -218,7 +215,7 @@ class InventarioResumenCard extends StatelessWidget {
                 ),
               ],
             ),
-            const SizedBox(height: 25),
+            const SizedBox(height: 35), // Increased from 25 for better spacing
             // Fila con Sacos y Bolsas en la misma línea
             Row(
               children: [
@@ -273,64 +270,70 @@ class InventarioResumenCard extends StatelessWidget {
                 ],
               ),
             ),
-            // Aviso compacto debajo si alguno está en cero
-            if (totalSacos <= 0 || totalBolsas <= 0) ...[
-              const SizedBox(height: 20),
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  vertical: 8,
-                  horizontal: 12,
-                ),
-                decoration: BoxDecoration(
-                  color: Colors.white.withValues(alpha: 0.15),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Column(
-                  children: [
-                    if (totalSacos <= 0)
-                      const Row(
-                        children: [
-                          Icon(
-                            Icons.warning_amber_rounded,
-                            color: Colors.white,
-                            size: 16,
-                          ),
-                          SizedBox(width: 8),
-                          Text(
-                            "Sin stock en SACO",
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 12,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                        ],
+            // Aviso compacto debajo si alguno está en cero - con AnimatedSize para expansión suave
+            AnimatedSize(
+              duration: const Duration(milliseconds: 300),
+              curve: Curves.easeInOut,
+              child: (totalSacos <= 0 || totalBolsas <= 0)
+                  ? Padding(
+                      padding: const EdgeInsets.only(top: 20),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          vertical: 8,
+                          horizontal: 12,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.15),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Column(
+                          children: [
+                            if (totalSacos <= 0)
+                              const Row(
+                                children: [
+                                  Icon(
+                                    Icons.warning_amber_rounded,
+                                    color: Colors.white,
+                                    size: 16,
+                                  ),
+                                  SizedBox(width: 8),
+                                  Text(
+                                    "Sin stock en SACO",
+                                    style: TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            if (totalSacos <= 0 && totalBolsas <= 0)
+                              const SizedBox(height: 4),
+                            if (totalBolsas <= 0)
+                              const Row(
+                                children: [
+                                  Icon(
+                                    Icons.warning_amber_rounded,
+                                    color: Colors.white,
+                                    size: 16,
+                                  ),
+                                  SizedBox(width: 8),
+                                  Text(
+                                    "Sin stock en BOLSA",
+                                    style: TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                          ],
+                        ),
                       ),
-                    if (totalSacos <= 0 && totalBolsas <= 0)
-                      const SizedBox(height: 4),
-                    if (totalBolsas <= 0)
-                      const Row(
-                        children: [
-                          Icon(
-                            Icons.warning_amber_rounded,
-                            color: Colors.white,
-                            size: 16,
-                          ),
-                          SizedBox(width: 8),
-                          Text(
-                            "Sin stock en BOLSA",
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 12,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                        ],
-                      ),
-                  ],
-                ),
-              ),
-            ],
+                    )
+                  : const SizedBox.shrink(),
+            ),
           ],
         ),
       ),
@@ -358,8 +361,8 @@ class InventarioResumenCard extends StatelessWidget {
               borderRadius: BorderRadius.circular(15),
               child: Padding(
                 padding: const EdgeInsets.symmetric(
-                  horizontal: 15,
-                  vertical: 10,
+                  horizontal: 12,
+                  vertical: 8,
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -369,21 +372,23 @@ class InventarioResumenCard extends StatelessWidget {
                       style: Theme.of(context).textTheme.bodyLarge?.copyWith(
                         fontWeight: FontWeight.bold,
                         color: Colors.white,
+                        fontSize: 14,
                       ),
                     ),
                     Row(
                       children: [
                         Text(
-                          "Disponible: $disponible",
+                          "Disp: $disponible",
                           style: Theme.of(context).textTheme.labelSmall
                               ?.copyWith(
                                 color: Colors.white.withValues(alpha: 0.8),
+                                fontSize: 10,
                               ),
                         ),
                         const SizedBox(width: 4),
                         const Icon(
                           Icons.info_outline_rounded,
-                          size: 12,
+                          size: 10,
                           color: Colors.white70,
                         ),
                       ],
@@ -394,9 +399,18 @@ class InventarioResumenCard extends StatelessWidget {
             ),
           ),
           if (!readOnly)
-            IconButton(
-              icon: const Icon(Icons.edit_note_rounded, color: Colors.white),
-              onPressed: () => _mostrarDialogoAjuste(context, nombre, id),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              child: IconButton(
+                icon: const Icon(
+                  Icons.edit_note_rounded,
+                  color: Colors.white,
+                  size: 20,
+                ),
+                onPressed: () => _mostrarDialogoAjuste(context, nombre, id),
+                padding: const EdgeInsets.all(8),
+                constraints: const BoxConstraints(),
+              ),
             ),
         ],
       ),
@@ -416,7 +430,7 @@ class InventarioResumenCard extends StatelessWidget {
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
       builder: (context) => Padding(
-        padding: const EdgeInsets.all(25.0),
+        padding: const EdgeInsets.fromLTRB(25, 25, 25, 15),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -449,7 +463,6 @@ class InventarioResumenCard extends StatelessWidget {
               disponible <= 0 ? Colors.red : Colors.green,
               esResultado: true,
             ),
-            const SizedBox(height: 10),
           ],
         ),
       ),
@@ -497,34 +510,141 @@ class InventarioResumenCard extends StatelessWidget {
 
   void _mostrarDialogoAjuste(BuildContext context, String nombre, String id) {
     final TextEditingController cantidadCtrl = TextEditingController();
+    String? motivoSeleccionado;
+    final formKey = GlobalKey<FormState>();
+
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        title: Text("Ajustar Stock - $nombre"),
-        content: TextField(
-          controller: cantidadCtrl,
-          keyboardType: TextInputType.number,
-          decoration: const InputDecoration(
-            hintText: "Ej: 100 o -50",
-            helperText: "Usa números negativos para restar",
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: Text("Ajustar Stock - $nombre"),
+          content: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 700),
+            child: Form(
+              key: formKey,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextFormField(
+                    controller: cantidadCtrl,
+                    keyboardType: TextInputType.numberWithOptions(signed: true),
+                    decoration: const InputDecoration(
+                      hintText: "Ej: 100 o -50",
+                      helperText: "Usa números negativos para restar",
+                      prefixIcon: Icon(Icons.inventory_2_outlined),
+                    ),
+                    validator: (v) {
+                      if (v == null || v.isEmpty) {
+                        return "Campo obligatorio";
+                      }
+                      final valor = int.tryParse(v.replaceAll('-', ''));
+                      if (valor == null) {
+                        return "Debe ser un número válido";
+                      }
+                      return null;
+                    },
+                  ),
+                  const SizedBox(height: 20),
+                  DropdownButtonFormField<String>(
+                    decoration: const InputDecoration(
+                      labelText: "Motivo del ajuste",
+                      prefixIcon: Icon(Icons.assignment_outlined),
+                      helperText: "Selecciona el motivo correspondiente",
+                    ),
+                    initialValue: motivoSeleccionado,
+                    hint: const Text("Selecciona un motivo"),
+                    items: [
+                      // Opciones para Entrada (valores positivos)
+                      const DropdownMenuItem(
+                        value: 'Producción del día',
+                        child: Text('📦 Producción del día'),
+                      ),
+                      const DropdownMenuItem(
+                        value: 'Devolución',
+                        child: Text('🔄 Devolución'),
+                      ),
+                      const DropdownMenuItem(
+                        value: 'Ajuste (+)',
+                        child: Text('➕ Ajuste (+)'),
+                      ),
+                      // Opciones para Salida (valores negativos)
+                      const DropdownMenuItem(
+                        value: 'Merma/Ruptura',
+                        child: Text('⚠️ Merma/Ruptura'),
+                      ),
+                      const DropdownMenuItem(
+                        value: 'Ajuste (-)',
+                        child: Text('➖ Ajuste (-)'),
+                      ),
+                    ],
+                    onChanged: (valor) {
+                      setDialogState(() {
+                        motivoSeleccionado = valor;
+                      });
+                    },
+                    validator: (v) {
+                      if (v == null || v.isEmpty) {
+                        return "Debe seleccionar un motivo";
+                      }
+                      return null;
+                    },
+                  ),
+                ],
+              ),
+            ),
           ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text("Cancelar"),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                // Validar formulario
+                if (!formKey.currentState!.validate()) {
+                  return;
+                }
+
+                final text = cantidadCtrl.text.trim();
+                if (text.isEmpty) {
+                  ScaffoldMessenger.of(dialogContext).showSnackBar(
+                    const SnackBar(
+                      content: Text("Por favor ingresa una cantidad"),
+                      backgroundColor: Colors.orange,
+                    ),
+                  );
+                  return;
+                }
+
+                int? valor = int.tryParse(text);
+                if (valor == null) {
+                  ScaffoldMessenger.of(dialogContext).showSnackBar(
+                    const SnackBar(
+                      content: Text("solo numeros no texto"),
+                      backgroundColor: Colors.red,
+                    ),
+                  );
+                  return;
+                }
+
+                if (motivoSeleccionado == null) {
+                  ScaffoldMessenger.of(dialogContext).showSnackBar(
+                    const SnackBar(
+                      content: Text("Debe seleccionar un motivo"),
+                      backgroundColor: Colors.orange,
+                    ),
+                  );
+                  return;
+                }
+
+                // Pasar el motivo al callback
+                onAjustar(dialogContext, id, valor, motivoSeleccionado!);
+                Navigator.pop(dialogContext);
+              },
+              child: const Text("Aplicar"),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text("Cancelar"),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              int? valor = int.tryParse(cantidadCtrl.text.trim());
-              if (valor != null) {
-                onAjustar(id, valor);
-                Navigator.pop(context);
-              }
-            },
-            child: const Text("Aplicar"),
-          ),
-        ],
       ),
     );
   }
@@ -554,7 +674,7 @@ class ListaPedidosPendientes extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const Padding(
-          padding: EdgeInsets.symmetric(vertical: 20, horizontal: 12),
+          padding: EdgeInsets.fromLTRB(12, 0, 12, 10),
           child: Text(
             "Pedidos en Proceso",
             style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
@@ -579,15 +699,22 @@ class ListaPedidosPendientes extends StatelessWidget {
                 children: [
                   ElevatedButton(
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.green[50],
-                      foregroundColor: Colors.green,
+                      backgroundColor: Colors.green,
+                      foregroundColor: Colors.white,
                       padding: const EdgeInsets.symmetric(horizontal: 12),
-                      minimumSize: const Size(0, 32),
+                      minimumSize: const Size(0, 36),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(15),
+                      ),
+                      elevation: 0,
                     ),
                     onPressed: () => onDespachar(pedido),
                     child: const Text(
                       "Despachar",
-                      style: TextStyle(fontSize: 12),
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                      ),
                     ),
                   ),
                 ],
