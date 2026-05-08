@@ -4,23 +4,27 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'dart:io' show Platform;
-// Imports para la nueva API v1
-// import 'package:googleapis_auth/auth_io.dart' as auth;
-// a importación http ya no es necesaria con la API v1
-// import 'package:http/http.dart' as http;
+import 'package:http/http.dart' as http;
+import 'dart:convert';
+
+enum NotifPriority { alta, media, baja }
 
 class NotificationService {
   final FirebaseMessaging _firebaseMessaging = FirebaseMessaging.instance;
   final FlutterLocalNotificationsPlugin _flutterLocalNotificationsPlugin =
       FlutterLocalNotificationsPlugin();
 
-  // Las credenciales de cuenta de servicio han sido eliminadas por seguridad.
-  // El envío de mensajes debe realizarse desde un entorno seguro (Cloud Functions o Backend).
+  // Configuración de GAS (Google Apps Script)
+  // Reemplazar con la URL de la Web App desplegada y tu propia API Key
+  static const String _gasWebAppUrl =
+      "https://script.google.com/macros/s/AKfycbwdvAxcqffTVqn8_4faDftfGOnjUOayASdR6WU1wN1ey1BofXbkdKIWjulRnbxOjluH/exec";
+  static const String _notifApiKey = "Frifalca.1978#";
 
   Future<void> initNotifications() async {
     await _firebaseMessaging.requestPermission();
     await subscribeToStockAlerts();
     await _initLocalNotifications();
+
     FirebaseMessaging.onMessage.listen((RemoteMessage message) {
       final notification = message.notification;
       if (notification != null && (Platform.isAndroid || Platform.isIOS)) {
@@ -57,11 +61,75 @@ class NotificationService {
     }
   }
 
-  Future<void> enviarAlertaStockBajo(String producto, int cantidad) async {
-    // El envío de notificaciones directas desde el cliente ha sido desactivado.
-    // Implementar lógica en Firebase Functions que reaccione a cambios en el inventario.
-    debugPrint(
-      "SIMULACIÓN: Alerta de stock bajo para $producto ($cantidad unidades).",
+  /// Envía una notificación a través del puente Google Apps Script (GAS)
+  Future<void> enviarNotificacionGAS({
+    String? token,
+    String? topic,
+    required String titulo,
+    required String cuerpo,
+    required NotifPriority prioridad,
+  }) async {
+    try {
+      // Si la prioridad es ALTA, se dispara de inmediato sin esperar (Fire and Forget opcional o await rápido)
+      final bool esUrgente = prioridad == NotifPriority.alta;
+
+      final Map<String, dynamic> payload = {
+        "api_key": _notifApiKey,
+        "token": token,
+        "topic": topic,
+        "title": titulo,
+        "body": cuerpo,
+        "priority": prioridad.name,
+      };
+
+      debugPrint("Enviando notificación GAS (${prioridad.name}): $titulo");
+
+      // Usamos un timeout corto para que la app no se cuelgue si el GAS tarda en responder
+      final response = await http
+          .post(
+            Uri.parse(_gasWebAppUrl),
+            headers: {"Content-Type": "application/json"},
+            body: jsonEncode(payload),
+          )
+          .timeout(Duration(seconds: esUrgente ? 5 : 10));
+
+      if (response.statusCode != 200) {
+        debugPrint(
+          "Error en respuesta GAS: ${response.statusCode} - ${response.body}",
+        );
+      }
+    } catch (e) {
+      debugPrint("Error al enviar notificación vía GAS: $e");
+      // El error se silencia para que la app continúe su flujo normal
+    }
+  }
+
+  // Métodos auxiliares para disparadores comunes
+  Future<void> notificarNuevoPedido(String ticket, double monto) async {
+    await enviarNotificacionGAS(
+      topic: "stock_alerts",
+      titulo: "¡Nuevo Pedido Registrado!",
+      cuerpo: "Ticket: $ticket por un monto de $monto Bs.",
+      prioridad: NotifPriority.alta,
+    );
+  }
+
+  Future<void> notificarStockBajo(String producto, int cantidad) async {
+    await enviarNotificacionGAS(
+      topic: "stock_alerts",
+      titulo: "⚠️ Alerta de Stock Bajo",
+      cuerpo:
+          "El producto $producto tiene solo $cantidad unidades disponibles.",
+      prioridad: NotifPriority.alta,
+    );
+  }
+
+  Future<void> notificarCitaAgendada(String cliente, String fecha) async {
+    await enviarNotificacionGAS(
+      topic: "stock_alerts",
+      titulo: "📅 Nueva Cita Agendada",
+      cuerpo: "Cliente: $cliente para el día $fecha.",
+      prioridad: NotifPriority.media,
     );
   }
 
@@ -91,7 +159,7 @@ class NotificationService {
             'ultima_modificacion': FieldValue.serverTimestamp(),
           }, SetOptions(merge: true));
     } catch (e) {
-      // print("Error al guardar token: $e");
+      // Silenciar errores de guardado de token
     }
   }
 
@@ -108,5 +176,40 @@ class NotificationService {
     await _flutterLocalNotificationsPlugin.initialize(
       settings: initializationSettings,
     );
+  }
+
+  /// Envía el respaldo completo a Google Drive a través del puente GAS
+  Future<bool> subirRespaldoDrive(Map<String, dynamic> datosJson) async {
+    try {
+      final Map<String, dynamic> payload = {
+        "api_key": _notifApiKey,
+        "action": "BACKUP",
+        "file_name":
+            "Respaldo_Frifalca_${DateTime.now().day}_${DateTime.now().month}.json",
+        "content": datosJson,
+      };
+
+      final response = await http
+          .post(
+            Uri.parse(_gasWebAppUrl),
+            headers: {"Content-Type": "application/json"},
+            body: jsonEncode(payload),
+          )
+          .timeout(
+            const Duration(seconds: 30),
+          ); // Damos tiempo para procesar el archivo
+
+      // GAS puede responder 200 o 302 (redirección post-ejecución), ambos son éxito
+      final exito = response.statusCode >= 200 && response.statusCode < 400;
+      if (!exito) {
+        debugPrint(
+          "Error GAS Drive: código ${response.statusCode} - ${response.body}",
+        );
+      }
+      return exito;
+    } catch (e) {
+      debugPrint("Error al subir respaldo a Drive: $e");
+      return false;
+    }
   }
 }

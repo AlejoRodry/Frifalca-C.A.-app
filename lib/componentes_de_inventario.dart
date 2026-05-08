@@ -51,93 +51,236 @@ class PedidoCard extends StatelessWidget {
   final Pedido pedido;
   final VoidCallback onTap;
   final Widget? trailingActions;
+  final bool isDetailed;
+  final bool fullWidth;
 
   const PedidoCard({
     super.key,
     required this.pedido,
     required this.onTap,
     this.trailingActions,
+    this.isDetailed = false,
+    this.fullWidth =
+        true, // Fuerzo que los pedidos sean alargados uniformemente
   });
 
   /// Obtiene el color de la barra lateral según el estado del pedido
   Color _getColorEstado() {
     if (pedido.sinStock && pedido.estado == 'Pendiente') {
-      return AppColors.pedidoSinStock; // Naranja
+      return AppColors.warning; // Naranja/Ambar
     }
     switch (pedido.estado) {
       case 'Despachado':
-        return AppColors.pedidoDespachado; // Verde
+        return AppColors.success; // Verde
       case 'Pendiente':
-        return AppColors.pedidoEnProceso; // Amarillo
+        return AppColors.warning; // Amarillo
       case 'Cancelado':
-        return AppColors.pedidoCancelado; // Rojo
+        return AppColors.error; // Rojo
       default:
-        return AppColors.secondary; // Color por defecto
+        return AppColors.secondary;
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final actions = trailingActions;
-    final fechaFormateada = pedido.fecha != null
-        ? "${pedido.fecha!.day}/${pedido.fecha!.month}/${pedido.fecha!.year}"
-        : "Sin fecha";
-
     final colorEstado = _getColorEstado();
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final bool esMixto = pedido.cantSaco > 0 && pedido.cantBolsa > 0;
 
-    return Card(
-      elevation: 1,
-      margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(12),
-        child: Container(
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(12),
-            border: Border(left: BorderSide(color: colorEstado, width: 5)),
+    return SizedBox(
+      width: fullWidth ? double.infinity : null,
+      child: Card(
+        elevation: isDetailed ? 0 : 2,
+        margin: isDetailed
+            ? EdgeInsets.zero
+            : const EdgeInsets.symmetric(horizontal: 20, vertical: 6),
+        color: isDetailed ? Colors.transparent : Theme.of(context).cardColor,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+        child: InkWell(
+          onTap: isDetailed ? null : onTap,
+          borderRadius: BorderRadius.circular(15),
+          child: Container(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(15),
+              border: isDetailed
+                  ? null
+                  : Border(left: BorderSide(color: colorEstado, width: 6)),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Cabecera: Ticket #001 (Texto reducido) + Badge
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        "Ticket #${pedido.ticket}",
+                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16, // 1rem Subtitulo
+                          color: isDark ? Colors.white : AppColors.primary,
+                        ),
+                      ),
+                      buildBadgeEstado(context, pedido.estado, pedido.sinStock),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+
+                  if (!isDetailed) ...[
+                    // VISTA RESUMIDA OPTIMIZADA (Mobile First)
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        // Bloque informativo Izquierdo
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                esMixto ? "Mixto" : pedido.tipoHielo,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 13, // 0.8rem Parrafo
+                                ),
+                              ),
+                              Text(
+                                "Sacos: ${pedido.cantSaco} | Bolsas: ${pedido.cantBolsa}",
+                                style: const TextStyle(
+                                  fontSize: 13, // 0.8rem Parrafo
+                                  color: Colors.blueGrey,
+                                ),
+                              ),
+                              Text(
+                                pedido.fecha != null
+                                    ? "${pedido.fecha!.day}/${pedido.fecha!.month} ${pedido.fecha!.hour}:${pedido.fecha!.minute.toString().padLeft(2, '0')}"
+                                    : "Sin fecha",
+                                style: const TextStyle(
+                                  color: Colors.grey,
+                                  fontSize: 12, // 0.75rem aprox
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+
+                        // Monto destacado a la izquierda de las acciones
+                        Padding(
+                          padding: const EdgeInsets.only(right: 8, bottom: 4),
+                          child: Text(
+                            "${pedido.monto.toStringAsFixed(0)} Bs",
+                            style: TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w900,
+                              color: isDark
+                                  ? AppColors.secondary
+                                  : AppColors.primary,
+                            ),
+                          ),
+                        ),
+
+                        // Acciones a la derecha
+                        ?trailingActions,
+                      ],
+                    ),
+                  ] else ...[
+                    // VISTA DETALLADA
+                    const Divider(),
+                    _buildDetailRow(
+                      context,
+                      Icons.inventory_2_outlined,
+                      "Especificación",
+                      pedido.tipoHielo,
+                    ),
+                    _buildDetailRow(
+                      context,
+                      Icons.shopping_cart_checkout_outlined,
+                      "Cantidades",
+                      "Sacos: ${pedido.cantSaco} | Bolsas: ${pedido.cantBolsa}",
+                    ),
+                    _buildDetailRow(
+                      context,
+                      Icons.payments_outlined,
+                      "Monto Total",
+                      "${pedido.monto.toStringAsFixed(2)} Bs",
+                    ),
+                    _buildDetailRow(
+                      context,
+                      Icons.person_add_alt_1_outlined,
+                      "Vendedor",
+                      pedido.creadoPor ?? "N/A",
+                    ),
+                    _buildDetailRow(
+                      context,
+                      Icons.local_shipping_outlined,
+                      "Estado Despacho",
+                      pedido.despachadoPor ?? "Pendiente",
+                    ),
+                    _buildDetailRow(
+                      context,
+                      Icons.history_edu_outlined,
+                      "Nº de Orden",
+                      pedido.orden ?? "General",
+                    ),
+                    if (pedido.detalleSaco != null ||
+                        pedido.detalleBolsa != null)
+                      _buildDetailRow(
+                        context,
+                        Icons.notes_outlined,
+                        "Notas Adicionales",
+                        "${pedido.detalleSaco ?? ''} ${pedido.detalleBolsa ?? ''}",
+                      ),
+                    const SizedBox(height: 10),
+                    ?trailingActions,
+                  ],
+                ],
+              ),
+            ),
           ),
-          child: Padding(
-            padding: const EdgeInsets.all(12.0),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDetailRow(
+    BuildContext context,
+    IconData icon,
+    String label,
+    String value,
+  ) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8.0),
+      child: Row(
+        children: [
+          Icon(icon, size: 20, color: AppColors.secondary),
+          const SizedBox(width: 12),
+          Expanded(
             child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text(
-                      "Ticket: ${pedido.ticket}",
-                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    buildBadgeEstado(context, pedido.estado, pedido.sinStock),
-                  ],
+                Text(
+                  label,
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: isDark
+                        ? Colors.blueGrey.shade300
+                        : Colors.blueGrey.shade700,
+                  ),
                 ),
-                const SizedBox(height: 8),
-                Row(
-                  children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            "Tipo: ${pedido.tipoHielo}",
-                            style: Theme.of(context).textTheme.bodyMedium,
-                          ),
-                          Text(
-                            "Fecha: $fechaFormateada",
-                            style: Theme.of(context).textTheme.bodyMedium,
-                          ),
-                        ],
-                      ),
-                    ),
-                    actions ?? const SizedBox.shrink(),
-                  ],
+                Text(
+                  value,
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                    color: isDark ? Colors.white : Colors.black87,
+                  ),
                 ),
               ],
             ),
           ),
-        ),
+        ],
       ),
     );
   }
@@ -164,30 +307,29 @@ class InventarioResumenCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final bool sinStock =
+        (sacoFisico - sacoComp) <= 0 || (bolsaFisico - bolsaComp) <= 0;
     final int totalSacos = (sacoFisico - sacoComp).clamp(0, 999999);
     final int totalBolsas = (bolsaFisico - bolsaComp).clamp(0, 999999);
-    bool stockCritico = totalSacos <= 0 || totalBolsas <= 0;
 
     return Container(
       width: double.infinity,
       decoration: BoxDecoration(
         gradient: LinearGradient(
-          colors: stockCritico
-              ? [
-                  const Color(0xFFF2994A), // Naranja suave
-                  const Color(0xFFF2C94C), // Amarillo sutil
-                ]
-              : [AppColors.primary, AppColors.primary.withValues(alpha: 0.9)],
+          colors: sinStock
+              ? [Colors.orange.shade800, Colors.red.shade700]
+              : [Colors.blue.shade800, Colors.cyan.shade600],
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
         ),
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(20),
         boxShadow: [
           BoxShadow(
-            color: (stockCritico ? AppColors.error : AppColors.primary)
-                .withValues(alpha: 0.12),
-            blurRadius: 10,
-            offset: const Offset(0, 4),
+            color: (sinStock ? Colors.orange : Colors.cyan).withValues(
+              alpha: 0.3,
+            ),
+            blurRadius: 15,
+            offset: const Offset(0, 8),
           ),
         ],
       ),
@@ -199,70 +341,95 @@ class InventarioResumenCard extends StatelessWidget {
           children: [
             Row(
               children: [
-                const Icon(
-                  Icons.inventory_2_rounded,
-                  color: Colors.white,
-                  size: 28,
-                ),
-                SizedBox(width: 12),
-                Text(
-                  "Control de Inventario",
-                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                    color: Colors.white,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 20,
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.2),
+                    shape: BoxShape.circle,
                   ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 35), // Increased from 25 for better spacing
-            // Fila con Sacos y Bolsas en la misma línea
-            Row(
-              children: [
-                Expanded(
-                  child: _itemProducto(
-                    context,
-                    "Sacos de Hielo",
-                    sacoFisico,
-                    sacoComp,
-                    "NZAtCFwTfLTwb3xiiOUk",
+                  child: const Icon(
+                    Icons.inventory_2_rounded,
+                    color: Colors.white,
+                    size: 24,
                   ),
                 ),
                 const SizedBox(width: 12),
                 Expanded(
-                  child: _itemProducto(
-                    context,
-                    "Bolsas de Hielo",
-                    bolsaFisico,
-                    bolsaComp,
-                    "DWDbVnRf5nqGu8uTu3KA",
+                  child: Text(
+                    "Control de Inventario",
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                    ),
                   ),
                 ),
               ],
             ),
-            const SizedBox(height: 15),
+            const SizedBox(height: 16),
+            LayoutBuilder(
+              builder: (context, constraints) {
+                // Si el ancho es menor a 340px, apilamos las tarjetas en vertical
+                bool stackModo = constraints.maxWidth < 340;
+
+                final items = [
+                  Expanded(
+                    flex: stackModo ? 0 : 1,
+                    child: _itemProducto(
+                      context,
+                      "Sacos de Hielo",
+                      sacoFisico,
+                      sacoComp,
+                      "NZAtCFwTfLTwb3xiiOUk",
+                    ),
+                  ),
+                  SizedBox(
+                    width: stackModo ? 0 : 12,
+                    height: stackModo ? 8 : 0,
+                  ),
+                  Expanded(
+                    flex: stackModo ? 0 : 1,
+                    child: _itemProducto(
+                      context,
+                      "Bolsas de Hielo",
+                      bolsaFisico,
+                      bolsaComp,
+                      "DWDbVnRf5nqGu8uTu3KA",
+                    ),
+                  ),
+                ];
+
+                return stackModo
+                    ? Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: items
+                            .map((w) => w is Expanded ? w.child : w)
+                            .toList(),
+                      )
+                    : Row(children: items);
+              },
+            ),
+            const SizedBox(height: 10),
             // Mensaje informativo
             Container(
               width: double.infinity,
               padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
               decoration: BoxDecoration(
-                color: Colors.white.withValues(alpha: 0.1),
+                color: Colors.black.withValues(alpha: 0.05),
                 borderRadius: BorderRadius.circular(10),
               ),
               child: const Row(
                 children: [
-                  Icon(
-                    Icons.touch_app_rounded,
-                    color: Colors.white70,
-                    size: 16,
-                  ),
+                  Icon(Icons.touch_app_rounded, color: Colors.white, size: 16),
                   SizedBox(width: 8),
                   Expanded(
                     child: Text(
                       "Toca un producto para ver el inventario con más detalle",
                       style: TextStyle(
                         color: Colors.white70,
-                        fontSize: 11,
+                        fontSize: 13, // 0.8rem Parrafo
                         fontWeight: FontWeight.w500,
                       ),
                     ),
@@ -276,14 +443,14 @@ class InventarioResumenCard extends StatelessWidget {
               curve: Curves.easeInOut,
               child: (totalSacos <= 0 || totalBolsas <= 0)
                   ? Padding(
-                      padding: const EdgeInsets.only(top: 20),
+                      padding: const EdgeInsets.only(top: 8),
                       child: Container(
                         padding: const EdgeInsets.symmetric(
                           vertical: 8,
                           horizontal: 12,
                         ),
                         decoration: BoxDecoration(
-                          color: Colors.white.withValues(alpha: 0.15),
+                          color: Colors.white.withValues(alpha: 0.1),
                           borderRadius: BorderRadius.circular(12),
                         ),
                         child: Column(
@@ -350,8 +517,9 @@ class InventarioResumenCard extends StatelessWidget {
     final int disponible = (fisico - comp).clamp(0, 999999);
     return Container(
       decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.1),
+        color: Colors.white.withValues(alpha: 0.15),
         borderRadius: BorderRadius.circular(15),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.1)),
       ),
       child: Row(
         children: [
@@ -362,33 +530,37 @@ class InventarioResumenCard extends StatelessWidget {
               child: Padding(
                 padding: const EdgeInsets.symmetric(
                   horizontal: 12,
-                  vertical: 8,
+                  vertical: 10,
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
                       nombre,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                       style: Theme.of(context).textTheme.bodyLarge?.copyWith(
                         fontWeight: FontWeight.bold,
                         color: Colors.white,
-                        fontSize: 14,
+                        fontSize: 14, // Reducido de 16
                       ),
                     ),
+                    const SizedBox(height: 4),
                     Row(
                       children: [
                         Text(
                           "Disp: $disponible",
                           style: Theme.of(context).textTheme.labelSmall
                               ?.copyWith(
-                                color: Colors.white.withValues(alpha: 0.8),
-                                fontSize: 10,
+                                color: Colors.white.withValues(alpha: 0.9),
+                                fontSize: 12, // Reducido de 13
+                                fontWeight: FontWeight.bold,
                               ),
                         ),
                         const SizedBox(width: 4),
                         const Icon(
                           Icons.info_outline_rounded,
-                          size: 10,
+                          size: 12,
                           color: Colors.white70,
                         ),
                       ],
@@ -400,12 +572,12 @@ class InventarioResumenCard extends StatelessWidget {
           ),
           if (!readOnly)
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8),
+              padding: const EdgeInsets.symmetric(horizontal: 4),
               child: IconButton(
                 icon: const Icon(
                   Icons.edit_note_rounded,
                   color: Colors.white,
-                  size: 20,
+                  size: 22,
                 ),
                 onPressed: () => _mostrarDialogoAjuste(context, nombre, id),
                 padding: const EdgeInsets.all(8),
@@ -557,24 +729,79 @@ class InventarioResumenCard extends StatelessWidget {
                       // Opciones para Entrada (valores positivos)
                       const DropdownMenuItem(
                         value: 'Producción del día',
-                        child: Text('📦 Producción del día'),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.inventory_2_outlined,
+                              size: 18,
+                              color: Colors.blue,
+                            ),
+                            SizedBox(width: 8),
+                            Text('Producción del día'),
+                          ],
+                        ),
                       ),
                       const DropdownMenuItem(
                         value: 'Devolución',
-                        child: Text('🔄 Devolución'),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.sync_rounded,
+                              size: 18,
+                              color: Colors.blue,
+                            ),
+                            SizedBox(width: 8),
+                            Text('Devolución'),
+                          ],
+                        ),
                       ),
                       const DropdownMenuItem(
                         value: 'Ajuste (+)',
-                        child: Text('➕ Ajuste (+)'),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.add_circle_outline_rounded,
+                              size: 18,
+                              color: Colors.blue,
+                            ),
+                            SizedBox(width: 8),
+                            Text('Ajuste (+)'),
+                          ],
+                        ),
                       ),
                       // Opciones para Salida (valores negativos)
                       const DropdownMenuItem(
                         value: 'Merma/Ruptura',
-                        child: Text('⚠️ Merma/Ruptura'),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.warning_amber_rounded,
+                              size: 18,
+                              color: Colors.orange,
+                            ),
+                            SizedBox(width: 8),
+                            Text('Merma/Ruptura'),
+                          ],
+                        ),
                       ),
                       const DropdownMenuItem(
                         value: 'Ajuste (-)',
-                        child: Text('➖ Ajuste (-)'),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.remove_circle_outline_rounded,
+                              size: 18,
+                              color: Colors.red,
+                            ),
+                            SizedBox(width: 8),
+                            Text('Ajuste (-)'),
+                          ],
+                        ),
                       ),
                     ],
                     onChanged: (valor) {
@@ -664,7 +891,10 @@ class ListaPedidosPendientes extends StatelessWidget {
     required this.onShowDetails,
     this.stockSacoDisp = 0,
     this.stockBolsaDisp = 0,
+    this.pedidosFullWidth = false,
   });
+
+  final bool pedidosFullWidth;
 
   @override
   Widget build(BuildContext context) {
@@ -674,7 +904,7 @@ class ListaPedidosPendientes extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const Padding(
-          padding: EdgeInsets.fromLTRB(12, 0, 12, 10),
+          padding: EdgeInsets.symmetric(horizontal: 20, vertical: 15),
           child: Text(
             "Pedidos en Proceso",
             style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
@@ -685,41 +915,97 @@ class ListaPedidosPendientes extends StatelessWidget {
             padding: EdgeInsets.all(20.0),
             child: Center(child: Text("No hay pedidos pendientes")),
           ),
-        ListView.builder(
-          shrinkWrap: true,
-          physics: const NeverScrollableScrollPhysics(),
-          itemCount: pendientes.length,
-          itemBuilder: (context, index) {
-            final pedido = pendientes[index];
+        LayoutBuilder(
+          builder: (context, gridConstraints) {
+            final int crossAxisCount =
+                (gridConstraints.maxWidth > 800 && !pedidosFullWidth) ? 2 : 1;
 
-            return PedidoCard(
-              pedido: pedido,
-              onTap: () => onShowDetails(pedido),
-              trailingActions: Row(
-                children: [
-                  ElevatedButton(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.green,
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(horizontal: 12),
-                      minimumSize: const Size(0, 36),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(15),
-                      ),
-                      elevation: 0,
+            if (crossAxisCount > 1) {
+              return GridView.builder(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                padding: const EdgeInsets.all(8),
+                gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+                  maxCrossAxisExtent: 600,
+                  crossAxisSpacing: 12,
+                  mainAxisSpacing: 12,
+                  mainAxisExtent: 135,
+                ),
+                itemCount: pendientes.length,
+                itemBuilder: (context, index) {
+                  final pedido = pendientes[index];
+                  return PedidoCard(
+                    pedido: pedido,
+                    onTap: () => onShowDetails(pedido),
+                    fullWidth: pedidosFullWidth,
+                    trailingActions: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.green,
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(horizontal: 12),
+                            minimumSize: const Size(0, 36),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(15),
+                            ),
+                            elevation: 0,
+                          ),
+                          onPressed: () => onDespachar(pedido),
+                          child: const Text(
+                            "Despachar",
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
-                    onPressed: () => onDespachar(pedido),
-                    child: const Text(
-                      "Despachar",
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.bold,
-                      ),
+                  );
+                },
+              );
+            } else {
+              return ListView.builder(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                itemCount: pendientes.length,
+                itemBuilder: (context, index) {
+                  final pedido = pendientes[index];
+                  return PedidoCard(
+                    pedido: pedido,
+                    onTap: () => onShowDetails(pedido),
+                    fullWidth: pedidosFullWidth,
+                    trailingActions: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.green,
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(horizontal: 12),
+                            minimumSize: const Size(0, 36),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(15),
+                            ),
+                            elevation: 0,
+                          ),
+                          onPressed: () => onDespachar(pedido),
+                          child: const Text(
+                            "Despachar",
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
-                  ),
-                ],
-              ),
-            );
+                  );
+                },
+              );
+            }
           },
         ),
       ],

@@ -433,9 +433,12 @@ class _Login extends State<Login> {
               ),
             ),
             const SizedBox(height: 25),
-            const Text(
+            Text(
               "Estado del Inventario",
-              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+              style: TextStyle(
+                fontSize: kIsWeb ? 16.0 : 19.0,
+                fontWeight: FontWeight.bold,
+              ),
             ),
             const SizedBox(height: 25),
             StreamBuilder<QuerySnapshot>(
@@ -516,9 +519,12 @@ class _Login extends State<Login> {
                   ),
                 ),
                 const SizedBox(height: 25),
-                const Text(
+                Text(
                   "Ingreso con Contraseña",
-                  style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                  style: TextStyle(
+                    fontSize: kIsWeb ? 16.0 : 19.0,
+                    fontWeight: FontWeight.bold,
+                  ),
                 ),
                 const SizedBox(height: 25),
                 if (_usuarioRecordado == null) ...[
@@ -552,11 +558,11 @@ class _Login extends State<Login> {
                   alignment: Alignment.centerRight,
                   child: GestureDetector(
                     onTap: _mostrarDialogoRecuperacion,
-                    child: const Text(
+                    child: Text(
                       "¿Olvidaste tu contraseña?",
                       style: TextStyle(
                         color: AppColors.secondary,
-                        fontSize: 14,
+                        fontSize: kIsWeb ? 11.0 : 13.0,
                         fontWeight: FontWeight.w500,
                       ),
                     ),
@@ -576,9 +582,12 @@ class _Login extends State<Login> {
                     Navigator.pop(context);
                     _procesarLogin();
                   },
-                  child: const Text(
+                  child: Text(
                     "Entrar ahora",
-                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                    style: TextStyle(
+                      fontSize: kIsWeb ? 14.0 : 16.0,
+                      fontWeight: FontWeight.bold,
+                    ),
                   ),
                 ),
                 if (_usuarioRecordado != null) ...[
@@ -653,7 +662,7 @@ class _Login extends State<Login> {
                 "Ingresa tu correo electrónico para recibir un enlace de restablecimiento.",
                 style: TextStyle(
                   color: isDark ? Colors.white70 : Colors.black54,
-                  fontSize: 13,
+                  fontSize: 12,
                 ),
                 textAlign: TextAlign.center,
               ),
@@ -740,6 +749,13 @@ class _Login extends State<Login> {
   Widget build(BuildContext context) {
     bool isDark = Theme.of(context).brightness == Brightness.dark;
 
+    // --- Tamaños de fuente responsivos: PC (web) más pequeño, Android más grande ---
+    final double fsTitle = kIsWeb ? 18.0 : 22.0; // "Iniciar Sesión" / "¡Hola!"
+    final double fsButton = kIsWeb ? 15.0 : 17.0; // Botón principal
+    final double fsLink = kIsWeb ? 11.0 : 13.0; // Links secundarios
+    final double fsSmall = kIsWeb ? 11.0 : 13.0; // "Mantener sesión", errores
+    final double fsForgot = kIsWeb ? 11.0 : 13.0; // "¿Olvidaste tu contraseña?"
+
     return Scaffold(
       extendBodyBehindAppBar: true,
       appBar: AppBar(
@@ -789,11 +805,11 @@ class _Login extends State<Login> {
               children: [
                 const SizedBox(height: 20),
                 Image.asset(
-                  'assets/frifalca6.png',
-                  height: 120,
+                  'assets/icon_web.png',
+                  height: kIsWeb ? 70 : 90,
                   fit: BoxFit.contain,
                 ),
-                const SizedBox(height: 30),
+                const SizedBox(height: 20),
 
                 // --- Glassmorphic Login Card (Optimizado para Web) ---
                 ConstrainedBox(
@@ -831,7 +847,7 @@ class _Login extends State<Login> {
                           style: Theme.of(context).textTheme.displayLarge
                               ?.copyWith(
                                 color: isDark ? Colors.white : Colors.black87,
-                                fontSize: 24,
+                                fontSize: fsTitle,
                               ),
                         ),
                         const SizedBox(height: 10),
@@ -879,11 +895,11 @@ class _Login extends State<Login> {
                             alignment: Alignment.centerRight,
                             child: GestureDetector(
                               onTap: _mostrarDialogoRecuperacion,
-                              child: const Text(
+                              child: Text(
                                 "¿Olvidaste tu contraseña?",
                                 style: TextStyle(
                                   color: AppColors.secondary,
-                                  fontSize: 14,
+                                  fontSize: fsForgot,
                                   fontWeight: FontWeight.w500,
                                 ),
                               ),
@@ -895,7 +911,7 @@ class _Login extends State<Login> {
                                 "Mantener la sesión",
                                 style: TextStyle(
                                   color: isDark ? Colors.white : Colors.black87,
-                                  fontSize: 13,
+                                  fontSize: fsSmall,
                                 ),
                               ),
                               value: _mantenerSesion,
@@ -917,10 +933,10 @@ class _Login extends State<Login> {
                               elevation: 0,
                             ),
                             onPressed: _procesarLogin,
-                            child: const Text(
+                            child: Text(
                               "Iniciar sesión",
                               style: TextStyle(
-                                fontSize: 18,
+                                fontSize: fsButton,
                                 fontWeight: FontWeight.bold,
                               ),
                             ),
@@ -995,9 +1011,9 @@ class _Login extends State<Login> {
                             padding: const EdgeInsets.only(top: 20),
                             child: Text(
                               _mensajeError,
-                              style: const TextStyle(
+                              style: TextStyle(
                                 color: Colors.redAccent,
-                                fontSize: 13,
+                                fontSize: fsSmall,
                               ),
                               textAlign: TextAlign.center,
                             ),
@@ -1033,31 +1049,33 @@ class _Login extends State<Login> {
                               "¿No eres tú? Iniciar sesión con otra cuenta",
                               style: GoogleFonts.inter(
                                 color: AppColors.secondary,
-                                fontSize: 14,
+                                fontSize: fsLink,
                                 fontWeight: FontWeight.w500,
                               ),
                             ),
                           ),
                         ],
-                        const SizedBox(height: 20),
-                        TextButton(
-                          onPressed: () {
-                            Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (context) =>
-                                    const RegistroTrabajadorScreen(),
+                        if (_usuarioRecordado == null) ...[
+                          const SizedBox(height: 20),
+                          TextButton(
+                            onPressed: () {
+                              Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (context) =>
+                                      const RegistroTrabajadorScreen(),
+                                ),
+                              );
+                            },
+                            child: Text(
+                              "¿Fuiste pre-autorizado? Registrate aquí",
+                              style: TextStyle(
+                                color: isDark ? Colors.white70 : Colors.black54,
+                                fontSize: fsLink,
                               ),
-                            );
-                          },
-                          child: Text(
-                            "¿Fuiste pre-autorizado? Registrate aquí",
-                            style: TextStyle(
-                              color: isDark ? Colors.white70 : Colors.black54,
-                              fontSize: 13,
                             ),
                           ),
-                        ),
+                        ],
                       ],
                     ),
                   ),

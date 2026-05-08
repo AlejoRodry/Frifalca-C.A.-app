@@ -1,4 +1,4 @@
-package com.example.frifalca_app
+package com.software.frifalca_app
 
 import io.flutter.embedding.android.FlutterFragmentActivity
 

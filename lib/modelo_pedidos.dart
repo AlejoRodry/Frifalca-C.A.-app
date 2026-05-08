@@ -20,6 +20,7 @@ class Pedido {
   final String? orden;
   final String? detalleSaco;
   final String? detalleBolsa;
+  final double? tasaAplicada;
 
   Pedido({
     required this.id,
@@ -37,6 +38,7 @@ class Pedido {
     this.orden,
     this.detalleSaco,
     this.detalleBolsa,
+    this.tasaAplicada,
   });
 
   // Convierte el mapa de Firestore en un objeto Pedido de forma 100% segura
@@ -70,6 +72,7 @@ class Pedido {
           infoHielo['orden']?.toString() ?? 'Saco', // Valor por defecto sensato
       detalleSaco: infoHielo['detalle_saco']?.toString() ?? 'Saco Público',
       detalleBolsa: infoHielo['detalle_bolsa']?.toString() ?? 'Bolsa Público',
+      tasaAplicada: (data['tasa_aplicada'] ?? 0).toDouble(),
     );
   }
 }
@@ -101,7 +104,7 @@ class Cita {
   });
 
   factory Cita.fromFirestore(DocumentSnapshot doc) {
-    final data = doc.data() as Map<String, dynamic>;
+    final data = (doc.data() as Map<String, dynamic>?) ?? {};
     DateTime fechaValidada = DateTime.now();
     try {
       final rawFecha = data['fecha'];
@@ -111,19 +114,19 @@ class Cita {
         fechaValidada = DateTime.tryParse(rawFecha) ?? DateTime.now();
       }
     } catch (_) {
-      // Fallback a DateTime.now() en caso de error
+      // Fallback a DateTime.now()
     }
 
     return Cita(
       id: doc.id,
-      nombre: data['nombre'] ?? '',
-      motivo: data['motivo'] ?? '',
+      nombre: data['nombre']?.toString() ?? '',
+      motivo: data['motivo']?.toString() ?? '',
       fecha: fechaValidada,
-      slot: data['slot'] ?? '',
-      idPedido: data['id_pedido'],
-      idCliente: data['id_cliente'],
-      nombreCliente: data['nombre_cliente'],
-      colorEtiqueta: data['color_etiqueta'] ?? "#FFA500",
+      slot: data['slot']?.toString() ?? '',
+      idPedido: data['id_pedido']?.toString(),
+      idCliente: data['id_cliente']?.toString(),
+      nombreCliente: data['nombre_cliente']?.toString(),
+      colorEtiqueta: data['color_etiqueta']?.toString() ?? "#FFA500",
       estadoAgendado: data['estado_agendado'] ?? false,
     );
   }

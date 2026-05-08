@@ -12,6 +12,12 @@ import 'dart:async';
 import 'ayuda_screen.dart';
 import 'dart:ui';
 
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:google_fonts/google_fonts.dart';
+import 'ajustes_sistema_screen.dart';
+import 'servicios_de_notificaciones.dart';
+import 'servicios_de_actualizacion.dart';
+
 class PanelPrincipal extends StatefulWidget {
   final VoidCallback onToggleTheme;
   final bool esInvitado;
@@ -28,19 +34,47 @@ class PanelPrincipal extends StatefulWidget {
 class _PanelPrincipalState extends State<PanelPrincipal>
     with TickerProviderStateMixin {
   final DatabaseService _dbService = DatabaseService();
-  final ScrollController _scrollController = ScrollController();
+  final NotificationService _notifService = NotificationService();
+  // Controladores y estados locales
   String _filtroTicket = "";
   String _filtroEstado = "Todos";
-  DateTime _selectedDate = DateTime.now();
+  DateTime _selectedDate = DateTime(
+    DateTime.now().year,
+    DateTime.now().month,
+    DateTime.now().day,
+  );
 
   late Stream<QuerySnapshot> _productosStream;
   late Stream<List<Cita>> _citasStream;
+  late Stream<DocumentSnapshot> _tasaStream;
+  late Stream<DocumentSnapshot> _ajustesStream;
   late Future<DocumentSnapshot?> _userFuture;
+
+  double _tasaVigente = 1.0;
+  bool _usarTasaAutomatica = false;
+
+  double _valorManualTasa = 1.0;
 
   // Claves para validación de formularios
   final _formKeyPedido = GlobalKey<FormState>();
   final _formKeyCliente = GlobalKey<FormState>();
   final _formKeyTrabajador = GlobalKey<FormState>();
+
+  DateTime? _ultimaVezVistoNotificaciones;
+  late AnimationController _notifAnimationController;
+
+  bool _mostrarTasaEnPedidos = false;
+  Pedido? _pedidoSeleccionado;
+  bool _mostrarPanelLateral = true;
+  bool _disenoCompacto = false;
+  bool _disenoPedidosLargo = false;
+
+  // Variables de Paginación y Filtros Avanzados
+  int _itemsPorPagina = 10;
+  int _paginaActual = 1;
+  String _filtroRangoTiempo =
+      "Hoy"; // Hoy, Semana, Mes, Año, Todo, Personalizado
+  DateTimeRange? _customDateRange;
 
   // Método de obtención de datos basado exclusivamente en el correo
   Future<DocumentSnapshot?> _obtenerPerfilPorEmail(String email) async {
@@ -65,6 +99,19 @@ class _PanelPrincipalState extends State<PanelPrincipal>
   void initState() {
     super.initState();
     final userAuth = FirebaseAuth.instance.currentUser;
+
+    // --- ACTIVACIÓN DE NOTIFICACIONES ---
+    _notifAnimationController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1000),
+    )..repeat(reverse: true);
+    _cargarUltimaVistaNotificaciones();
+
+    if (!widget.esInvitado) {
+      _notifService.initNotifications();
+      _notifService.saveTokenForCurrentUser();
+    }
+
     // Iniciamos la carga basada en email como llave única
     if (userAuth != null && userAuth.email != null) {
       final String safeEmail = userAuth.email!.trim().toLowerCase();
@@ -77,13 +124,93 @@ class _PanelPrincipalState extends State<PanelPrincipal>
         .collection('Productos')
         .snapshots();
     _citasStream = _dbService.streamCitasDelDia(_selectedDate);
+    _tasaStream = _dbService.streamConfiguracionTasa();
+    _ajustesStream = _dbService.streamAjustesSistema();
+
+    // Listener para la tasa
+    _tasaStream.listen((snap) {
+      if (snap.exists && mounted) {
+        final data = snap.data() as Map<String, dynamic>;
+        setState(() {
+          _usarTasaAutomatica = data['usar_automatica'] ?? false;
+          _valorManualTasa = (data['valor_manual'] ?? 1.0).toDouble();
+
+          if (_usarTasaAutomatica) {
+            final double bcv = (data['ultima_bcv'] ?? 0.0).toDouble();
+            // Refuerzo de seguridad: Si el valor automático es inválido (nulo o 0),
+            // usamos el valor manual como fallback inmediato.
+            _tasaVigente = (bcv > 0) ? bcv : _valorManualTasa;
+          } else {
+            _tasaVigente = _valorManualTasa;
+          }
+        });
+      }
+    });
+
+    // Listener para ajustes del sistema (Visibilidad de Tasa)
+    _ajustesStream.listen((snap) {
+      if (snap.exists && mounted) {
+        final data = snap.data() as Map<String, dynamic>;
+        setState(() {
+          _mostrarTasaEnPedidos = data['calcular_precios_auto'] ?? false;
+          _itemsPorPagina = data['items_por_pagina'] ?? 10;
+          _mostrarPanelLateral = data['mostrar_panel_lateral'] ?? true;
+          _disenoCompacto = data['diseno_compacto'] ?? false;
+          _disenoPedidosLargo = data['diseno_pedidos_largo'] ?? false;
+        });
+      }
+    });
+
+    // Actualizar tasa al iniciar si está en automático
+    _dbService.obtenerTasaVigente();
+
+    // Verificación de actualización remota (OTA)
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      UpdateService.checkUpdate(context);
+    });
   }
 
   @override
   void dispose() {
-    _scrollController.dispose();
+    _notifAnimationController.dispose();
     super.dispose();
   }
+
+  Future<void> _cargarUltimaVistaNotificaciones() async {
+    final prefs = await SharedPreferences.getInstance();
+    final int? timestamp = prefs.getInt('ultima_visto_notif');
+    if (timestamp != null) {
+      if (mounted) {
+        setState(() {
+          _ultimaVezVistoNotificaciones = DateTime.fromMillisecondsSinceEpoch(
+            timestamp,
+          );
+        });
+      }
+    } else {
+      // Si es la primera vez, marcamos como visto "ahora" para no mostrar puntos rojos por notificaciones viejas
+      final ahora = DateTime.now();
+      await prefs.setInt('ultima_visto_notif', ahora.millisecondsSinceEpoch);
+      if (mounted) {
+        setState(() {
+          _ultimaVezVistoNotificaciones = ahora;
+        });
+      }
+    }
+  }
+
+  Future<void> _marcarNotificacionesComoLeidas() async {
+    final prefs = await SharedPreferences.getInstance();
+    final ahora = DateTime.now();
+    await prefs.setInt('ultima_visto_notif', ahora.millisecondsSinceEpoch);
+    if (mounted) {
+      setState(() {
+        _ultimaVezVistoNotificaciones = ahora;
+      });
+    }
+  }
+
+  // setEstaEditando y seleccionarPedido removidos.
 
   // Ya no usamos variables de estado para el nombre y el rol,
   // sino que los obtenemos directamente del StreamBuilder en el build.
@@ -126,6 +253,75 @@ class _PanelPrincipalState extends State<PanelPrincipal>
         }
 
         final userData = userSnap.data!.data() as Map<String, dynamic>;
+
+        // --- VERIFICACIÓN DE BLOQUEO ---
+        if (userData['bloqueado'] == true) {
+          return Scaffold(
+            backgroundColor: AppColors.primary,
+            body: Center(
+              child: Padding(
+                padding: const EdgeInsets.all(40.0),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(20),
+                      decoration: BoxDecoration(
+                        color: Colors.red.withValues(alpha: 0.1),
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(
+                        Icons.block_rounded,
+                        color: Colors.red,
+                        size: 80,
+                      ),
+                    ),
+                    const SizedBox(height: 30),
+                    const Text(
+                      "ACCESO RESTRINGIDO",
+                      style: TextStyle(
+                        fontSize: 24,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
+                        letterSpacing: 1.2,
+                      ),
+                    ),
+                    const SizedBox(height: 15),
+                    const Text(
+                      "Tu cuenta ha sido suspendida por el administrador del sistema.",
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: Colors.white70, fontSize: 16),
+                    ),
+                    const SizedBox(height: 10),
+                    const Text(
+                      "Si crees que se trata de un error, por favor contacta al soporte técnico de Frifalca.",
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: Colors.white54, fontSize: 14),
+                    ),
+                    const SizedBox(height: 40),
+                    ElevatedButton.icon(
+                      onPressed: () => FirebaseAuth.instance.signOut(),
+                      icon: const Icon(Icons.logout_rounded),
+                      label: const Text("Cerrar Sesión"),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.white,
+                        foregroundColor: AppColors.primary,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 30,
+                          vertical: 12,
+                        ),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(15),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        }
+
         final String nombreCompleto =
             "${userData['nombre'] ?? 'Sin nombre'} ${userData['apellido'] ?? ''}"
                 .trim();
@@ -143,7 +339,7 @@ class _PanelPrincipalState extends State<PanelPrincipal>
   ) {
     return LayoutBuilder(
       builder: (context, constraints) {
-        final bool isDesktop = constraints.maxWidth >= 800;
+        final bool isDesktop = constraints.maxWidth >= 600;
         return Builder(
           builder: (context) {
             final int tabLength = widget.esInvitado ? 1 : 4;
@@ -276,91 +472,79 @@ class _PanelPrincipalState extends State<PanelPrincipal>
     final int sacoDisp = (sacoFisico - sacoComp).clamp(0, 999999);
     final int bolsaDisp = (bolsaFisico - bolsaComp).clamp(0, 999999);
 
-    return Scrollbar(
-      controller: _scrollController,
-      thumbVisibility: true,
-      trackVisibility: true,
-      thickness: 8.0,
-      radius: const Radius.circular(10),
-      child: CustomScrollView(
-        controller: _scrollController,
-        physics: const BouncingScrollPhysics(),
-        slivers: [
-          if (showHeader) ...[
-            SliverToBoxAdapter(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(20, 25, 20, 15),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Image.asset('assets/frifalca6.png', height: 40),
-                    Text(
-                      "Frifalca C.A.",
-                      style: Theme.of(context).textTheme.headlineMedium
-                          ?.copyWith(
-                            color: AppColors.secondary,
-                            fontWeight: FontWeight.bold,
-                          ),
-                    ),
-                    Row(
-                      children: [
-                        _buildHeaderButton(
-                          icon: Theme.of(context).brightness == Brightness.dark
-                              ? Icons.light_mode
-                              : Icons.dark_mode,
-                          color: Theme.of(context).brightness == Brightness.dark
-                              ? Colors.yellow
-                              : AppColors.primary,
-                          onPressed: widget.onToggleTheme,
-                        ),
-                        _buildHeaderButton(
-                          icon: Icons.logout_rounded,
-                          color: AppColors.error,
-                          onPressed: () => _mostrarConfirmacionLogout(context),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            SliverToBoxAdapter(
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 20),
-                child: _buildGreetingCard(nombreCompleto),
-              ),
-            ),
-          ],
-
-          SliverPersistentHeader(
-            pinned: true,
-            delegate: _DynamicInventoryHeaderDelegate(
-              sacoFisico: sacoFisico,
-              sacoComp: sacoComp,
-              bolsaFisico: bolsaFisico,
-              bolsaComp: bolsaComp,
-              esInvitado: widget.esInvitado,
-              nombreCompleto: nombreCompleto,
-              onAjustar: (context, id, cant, motivo) =>
-                  _procesarAjusteInventario(
-                    context,
-                    id,
-                    cant,
-                    nombreCompleto,
-                    motivo,
+    return NestedScrollView(
+      headerSliverBuilder: (context, innerBoxIsScrolled) => [
+        if (showHeader)
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(20, 20, 20, 5),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Row(
+                    children: [
+                      Text(
+                        "Frifalca C.A.",
+                        style: Theme.of(context).textTheme.headlineMedium
+                            ?.copyWith(
+                              color: AppColors.secondary,
+                              fontWeight: FontWeight.bold,
+                            ),
+                      ),
+                      const SizedBox(width: 20),
+                      _buildHeaderGreeting(nombreCompleto),
+                    ],
                   ),
+                  Row(
+                    children: [
+                      _buildNotificationBellButton(),
+                      _buildHeaderButton(
+                        icon: Theme.of(context).brightness == Brightness.dark
+                            ? Icons.light_mode
+                            : Icons.dark_mode,
+                        color: Theme.of(context).brightness == Brightness.dark
+                            ? Colors.yellow
+                            : AppColors.primary,
+                        onPressed: widget.onToggleTheme,
+                      ),
+                      _buildHeaderButton(
+                        icon: Icons.logout_rounded,
+                        color: AppColors.error,
+                        onPressed: () => _mostrarConfirmacionLogout(context),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
             ),
           ),
-
-          Builder(
-            builder: (context) {
-              final tabController = DefaultTabController.of(context);
-              return AnimatedBuilder(
-                animation: tabController,
-                builder: (context, _) {
-                  final index = tabController.index;
-                  if (widget.esInvitado) {
-                    return _buildInventarioSliver(
+        SliverPersistentHeader(
+          pinned: true,
+          delegate: _DynamicInventoryHeaderDelegate(
+            sacoFisico: sacoFisico,
+            sacoComp: sacoComp,
+            bolsaFisico: bolsaFisico,
+            bolsaComp: bolsaComp,
+            esInvitado: widget.esInvitado,
+            nombreCompleto: nombreCompleto,
+            rolActual: rolActual,
+            onAjustar: (context, id, cant, motivo) => _procesarAjusteInventario(
+              context,
+              id,
+              cant,
+              nombreCompleto,
+              motivo,
+            ),
+          ),
+        ),
+      ],
+      body: TabBarView(
+        children: widget.esInvitado
+            ? [
+                CustomScrollView(
+                  physics: const BouncingScrollPhysics(),
+                  slivers: [
+                    _buildInventarioSliver(
                       sacoDisp,
                       bolsaDisp,
                       nombreCompleto,
@@ -369,51 +553,68 @@ class _PanelPrincipalState extends State<PanelPrincipal>
                       sacoComp,
                       bolsaFisico,
                       bolsaComp,
-                    );
-                  }
-
-                  switch (index) {
-                    case 0:
-                      return _buildInventarioSliver(
-                        sacoDisp,
-                        bolsaDisp,
-                        nombreCompleto,
-                        rolActual,
-                        sacoFisico,
-                        sacoComp,
-                        bolsaFisico,
-                        bolsaComp,
-                      );
-                    case 1:
-                      return _buildPedidosSliver(
-                        rolActual,
-                        nombreCompleto,
-                        sacoFisico,
-                        sacoComp,
-                        bolsaFisico,
-                        bolsaComp,
-                      );
-                    case 2:
-                      return _buildCitasSliver(
-                        rolActual,
-                        nombreCompleto,
-                        sacoFisico,
-                        sacoComp,
-                        bolsaFisico,
-                        bolsaComp,
-                      );
-                    case 3:
-                      return _buildConfiguracionesSliver(rolActual, userData);
-                    default:
-                      return const SliverToBoxAdapter(child: SizedBox());
-                  }
-                },
-              );
-            },
-          ),
-
-          const SliverToBoxAdapter(child: SizedBox(height: 100)),
-        ],
+                    ),
+                    const SliverToBoxAdapter(child: SizedBox(height: 100)),
+                  ],
+                ),
+              ]
+            : [
+                // TAB 0: PANEL
+                CustomScrollView(
+                  physics: const BouncingScrollPhysics(),
+                  slivers: [
+                    _buildInventarioSliver(
+                      sacoDisp,
+                      bolsaDisp,
+                      nombreCompleto,
+                      rolActual,
+                      sacoFisico,
+                      sacoComp,
+                      bolsaFisico,
+                      bolsaComp,
+                    ),
+                    const SliverToBoxAdapter(child: SizedBox(height: 100)),
+                  ],
+                ),
+                // TAB 1: PEDIDOS
+                CustomScrollView(
+                  physics: const BouncingScrollPhysics(),
+                  slivers: [
+                    _buildPedidosSliver(
+                      rolActual,
+                      nombreCompleto,
+                      sacoFisico,
+                      sacoComp,
+                      bolsaFisico,
+                      bolsaComp,
+                    ),
+                    const SliverToBoxAdapter(child: SizedBox(height: 100)),
+                  ],
+                ),
+                // TAB 2: CITAS
+                CustomScrollView(
+                  physics: const BouncingScrollPhysics(),
+                  slivers: [
+                    _buildCitasSliver(
+                      rolActual,
+                      nombreCompleto,
+                      sacoFisico,
+                      sacoComp,
+                      bolsaFisico,
+                      bolsaComp,
+                    ),
+                    const SliverToBoxAdapter(child: SizedBox(height: 100)),
+                  ],
+                ),
+                // TAB 3: CONFIG
+                CustomScrollView(
+                  physics: const BouncingScrollPhysics(),
+                  slivers: [
+                    _buildConfiguracionesSliver(rolActual, userData),
+                    const SliverToBoxAdapter(child: SizedBox(height: 100)),
+                  ],
+                ),
+              ],
       ),
     );
   }
@@ -456,60 +657,96 @@ class _PanelPrincipalState extends State<PanelPrincipal>
     int bolsaComp,
   ) {
     final controller = DefaultTabController.of(railContext);
-    return NavigationRail(
-      selectedIndex: controller.index,
-      onDestinationSelected: (int index) {
-        setState(() {
-          controller.animateTo(index);
-        });
-      },
-      leading: Column(
-        children: [
-          const SizedBox(height: 20),
-          Image.asset('assets/frifalca6.png', height: 40),
-          const SizedBox(height: 30),
-          FloatingActionButton(
-            mini: true,
-            elevation: 0,
-            backgroundColor: AppColors.secondary,
-            onPressed: () => _mostrarDialogoNuevoPedido(
-              context,
-              nombreCompleto,
-              sacoFisico,
-              sacoComp,
-              bolsaFisico,
-              bolsaComp,
+    final isDark = Theme.of(railContext).brightness == Brightness.dark;
+
+    return Container(
+      decoration: BoxDecoration(
+        border: Border(
+          right: BorderSide(
+            color: (isDark ? Colors.white : Colors.black).withValues(
+              alpha: 0.1,
             ),
-            child: const Icon(Icons.add, color: Colors.white),
+            width: 0.5,
           ),
-          const SizedBox(height: 10),
-        ],
+        ),
       ),
-      backgroundColor: AppColors.primary,
-      indicatorColor: AppColors.secondary.withValues(alpha: 0.2),
-      selectedIconTheme: const IconThemeData(color: AppColors.secondary),
-      unselectedIconTheme: const IconThemeData(color: Colors.white54),
-      selectedLabelTextStyle: const TextStyle(color: AppColors.secondary),
-      unselectedLabelTextStyle: const TextStyle(color: Colors.white54),
-      labelType: NavigationRailLabelType.all,
-      destinations: const [
-        NavigationRailDestination(
-          icon: Icon(Icons.grid_view_rounded),
-          label: Text("Panel"),
+      child: ClipRect(
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
+          child: NavigationRail(
+            selectedIndex: controller.index,
+            onDestinationSelected: (int index) {
+              setState(() {
+                controller.animateTo(index);
+              });
+            },
+            leading: Column(
+              children: [
+                const SizedBox(height: 20),
+                Image.asset(
+                  'assets/icon_web.png',
+                  height: 45,
+                  fit: BoxFit.contain,
+                ),
+                const SizedBox(height: 25),
+                FloatingActionButton(
+                  mini: true,
+                  onPressed: () => _mostrarDialogoNuevoPedido(
+                    context,
+                    nombreCompleto,
+                    sacoFisico,
+                    sacoComp,
+                    bolsaFisico,
+                    bolsaComp,
+                  ),
+                  backgroundColor: Colors.cyanAccent.shade700,
+                  elevation: 4,
+                  child: const Icon(Icons.add, color: Colors.white),
+                ),
+                const SizedBox(height: 10),
+              ],
+            ),
+            backgroundColor: (isDark ? Colors.black : Colors.white).withValues(
+              alpha: 0.85,
+            ),
+            indicatorColor: AppColors.secondary.withValues(alpha: 0.2),
+            selectedIconTheme: IconThemeData(
+              color: isDark ? AppColors.secondary : AppColors.primary,
+            ),
+            unselectedIconTheme: IconThemeData(
+              color: isDark ? Colors.blueGrey : Colors.black45,
+            ),
+            selectedLabelTextStyle: GoogleFonts.outfit(
+              color: isDark ? AppColors.secondary : AppColors.primary,
+              fontWeight: FontWeight.bold,
+              fontSize: 12,
+            ),
+            unselectedLabelTextStyle: GoogleFonts.outfit(
+              color: isDark ? Colors.blueGrey : Colors.black87,
+              fontSize: 11,
+            ),
+            labelType: NavigationRailLabelType.all,
+            destinations: const [
+              NavigationRailDestination(
+                icon: Icon(Icons.grid_view_rounded),
+                label: Text("Panel"),
+              ),
+              NavigationRailDestination(
+                icon: Icon(Icons.receipt_long_rounded),
+                label: Text("Pedidos"),
+              ),
+              NavigationRailDestination(
+                icon: Icon(Icons.calendar_month_rounded),
+                label: Text("Citas"),
+              ),
+              NavigationRailDestination(
+                icon: Icon(Icons.settings_suggest_rounded),
+                label: Text("Config"),
+              ),
+            ],
+          ),
         ),
-        NavigationRailDestination(
-          icon: Icon(Icons.receipt_long_rounded),
-          label: Text("Pedidos"),
-        ),
-        NavigationRailDestination(
-          icon: Icon(Icons.calendar_month_rounded),
-          label: Text("Citas"),
-        ),
-        NavigationRailDestination(
-          icon: Icon(Icons.settings_suggest_rounded),
-          label: Text("Config"),
-        ),
-      ],
+      ),
     );
   }
 
@@ -537,39 +774,104 @@ class _PanelPrincipalState extends State<PanelPrincipal>
     );
   }
 
-  Widget _buildGreetingCard(String nombre) {
+  Widget _buildNotificationBellButton() {
+    return StreamBuilder<List<QueryDocumentSnapshot>>(
+      stream: _dbService.streamNotificaciones(limite: 1),
+      builder: (context, snapshot) {
+        bool hayNuevas = false;
+        if (snapshot.hasData && snapshot.data!.isNotEmpty) {
+          final data = snapshot.data!.first.data() as Map<String, dynamic>;
+          final fecha = (data['fecha'] as Timestamp?)?.toDate();
+          if (fecha != null &&
+              (_ultimaVezVistoNotificaciones == null ||
+                  fecha.isAfter(_ultimaVezVistoNotificaciones!))) {
+            hayNuevas = true;
+          }
+        }
+
+        return Stack(
+          alignment: Alignment.center,
+          children: [
+            _buildHeaderButton(
+              icon: hayNuevas
+                  ? Icons.notifications_active_rounded
+                  : Icons.notifications_none_rounded,
+              color: AppColors.secondary,
+              onPressed: () => _mostrarCentroNotificaciones(context),
+            ),
+            if (hayNuevas)
+              Positioned(
+                top: 10,
+                right: 10,
+                child: FadeTransition(
+                  opacity: _notifAnimationController,
+                  child: Container(
+                    width: 10,
+                    height: 10,
+                    decoration: const BoxDecoration(
+                      color: Colors.red,
+                      shape: BoxShape.circle,
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.redAccent,
+                          blurRadius: 4,
+                          spreadRadius: 1,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        );
+      },
+    );
+  }
+
+  /// Nuevo widget para el saludo compacto en el encabezado
+  Widget _buildHeaderGreeting(String nombre) {
     return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(20),
-      // ... resto del widget sin cambios significativos en UI
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       decoration: BoxDecoration(
-        color: Theme.of(context).cardColor.withValues(alpha: 0.8),
-        borderRadius: BorderRadius.circular(40),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.cyan.withValues(alpha: 0.05),
-            blurRadius: 20,
-            offset: const Offset(0, 10),
-          ),
-        ],
+        color: Theme.of(context).cardColor.withValues(alpha: 0.5),
+        borderRadius: BorderRadius.circular(30),
+        border: Border.all(
+          color:
+              (Theme.of(context).brightness == Brightness.dark
+                      ? Colors.white
+                      : Colors.black)
+                  .withValues(alpha: 0.05),
+        ),
       ),
-      child: Column(
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Text(
-            "Panel Central",
-            style: TextStyle(
-              color: Theme.of(context).brightness == Brightness.dark
-                  ? Colors.grey[400]
-                  : Colors.grey[600],
-              fontSize: 14,
+          CircleAvatar(
+            radius: 12,
+            backgroundColor: AppColors.secondary.withValues(alpha: 0.2),
+            child: const Icon(
+              Icons.person_rounded,
+              color: AppColors.secondary,
+              size: 14,
             ),
           ),
-          const SizedBox(height: 5),
-          Text(
-            "¡Buen día, ${nombre.split(' ')[0]}!",
-            style: Theme.of(
-              context,
-            ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
+          const SizedBox(width: 10),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                "¡Buen día!",
+                style: TextStyle(fontSize: 12, color: Colors.blueGrey),
+              ),
+              Text(
+                nombre,
+                style: const TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
           ),
         ],
       ),
@@ -578,47 +880,66 @@ class _PanelPrincipalState extends State<PanelPrincipal>
 
   Widget _buildBottomNav(BuildContext context) {
     final controller = DefaultTabController.of(context);
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
     return ListenableBuilder(
       listenable: controller,
       builder: (context, _) {
-        return BottomAppBar(
-          shape: const CircularNotchedRectangle(),
-          notchMargin: 8.0,
-          color: Theme.of(context).cardColor,
-          elevation: 10,
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceAround,
-            children: [
-              _buildMobileNavItem(
-                context,
-                index: 0,
-                icon: Icons.grid_view_rounded,
-                label: "Panel",
-                selected: controller.index == 0,
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(30),
+            child: BackdropFilter(
+              filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
+              child: Container(
+                height: 65,
+                decoration: BoxDecoration(
+                  color: (isDark ? Colors.black : Colors.white).withValues(
+                    alpha: 0.85,
+                  ),
+                  borderRadius: BorderRadius.circular(30),
+                  border: Border.all(
+                    color: (isDark ? Colors.white : Colors.black).withValues(
+                      alpha: 0.1,
+                    ),
+                    width: 0.5,
+                  ),
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                  children: [
+                    _buildMobileNavItem(
+                      context,
+                      index: 0,
+                      icon: Icons.grid_view_rounded,
+                      label: "Panel",
+                      selected: controller.index == 0,
+                    ),
+                    _buildMobileNavItem(
+                      context,
+                      index: 1,
+                      icon: Icons.receipt_long_rounded,
+                      label: "Pedidos",
+                      selected: controller.index == 1,
+                    ),
+                    _buildMobileNavItem(
+                      context,
+                      index: 2,
+                      icon: Icons.calendar_month_rounded,
+                      label: "Citas",
+                      selected: controller.index == 2,
+                    ),
+                    _buildMobileNavItem(
+                      context,
+                      index: 3,
+                      icon: Icons.settings_rounded,
+                      label: "Config",
+                      selected: controller.index == 3,
+                    ),
+                  ],
+                ),
               ),
-              _buildMobileNavItem(
-                context,
-                index: 1,
-                icon: Icons.receipt_long_rounded,
-                label: "Pedidos",
-                selected: controller.index == 1,
-              ),
-              const SizedBox(width: 40), // Espacio para el FAB central
-              _buildMobileNavItem(
-                context,
-                index: 2,
-                icon: Icons.calendar_month_rounded,
-                label: "Citas",
-                selected: controller.index == 2,
-              ),
-              _buildMobileNavItem(
-                context,
-                index: 3,
-                icon: Icons.settings_rounded,
-                label: "Config",
-                selected: controller.index == 3,
-              ),
-            ],
+            ),
           ),
         );
       },
@@ -632,6 +953,10 @@ class _PanelPrincipalState extends State<PanelPrincipal>
     required String label,
     required bool selected,
   }) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final activeColor = isDark ? AppColors.secondary : AppColors.primary;
+    final inactiveColor = isDark ? Colors.blueGrey : Colors.black87;
+
     return Expanded(
       child: InkWell(
         onTap: () {
@@ -640,16 +965,12 @@ class _PanelPrincipalState extends State<PanelPrincipal>
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(
-              icon,
-              color: selected ? AppColors.secondary : Colors.blueGrey,
-              size: 24,
-            ),
+            Icon(icon, color: selected ? activeColor : inactiveColor, size: 24),
             Text(
               label,
               style: TextStyle(
                 fontSize: 10,
-                color: selected ? AppColors.secondary : Colors.blueGrey,
+                color: selected ? activeColor : inactiveColor,
                 fontWeight: selected ? FontWeight.bold : FontWeight.normal,
               ),
             ),
@@ -667,21 +988,52 @@ class _PanelPrincipalState extends State<PanelPrincipal>
     int bF,
     int bC,
   ) {
+    // Cálculo de fechas según filtro
+    DateTime? start;
+    DateTime? end;
+    final now = DateTime.now();
+
+    switch (_filtroRangoTiempo) {
+      case "Hoy":
+        start = DateTime(now.year, now.month, now.day);
+        end = DateTime(now.year, now.month, now.day, 23, 59, 59);
+        break;
+      case "Esta Semana":
+        start = now.subtract(Duration(days: now.weekday - 1));
+        start = DateTime(start.year, start.month, start.day);
+        end = now.add(Duration(days: 7 - now.weekday));
+        end = DateTime(end.year, end.month, end.day, 23, 59, 59);
+        break;
+      case "Este Mes":
+        start = DateTime(now.year, now.month, 1);
+        end = DateTime(now.year, now.month + 1, 0, 23, 59, 59);
+        break;
+      case "Este Año":
+        start = DateTime(now.year, 1, 1);
+        end = DateTime(now.year, 12, 31, 23, 59, 59);
+        break;
+      case "Personalizado":
+        start = _customDateRange?.start;
+        end = _customDateRange?.end;
+        break;
+      default:
+        start = null;
+        end = null;
+    }
+
     return SliverToBoxAdapter(
       child: Column(
         children: [
-          // --- BARRA DE BÚSQUEDA Y FILTROS ---
+          const SizedBox(height: 12), // Espacio estándar MD3
+          // --- BARRA DE BÚSQUEDA ---
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+            padding: const EdgeInsets.symmetric(horizontal: 20),
             child: Container(
-              padding: const EdgeInsets.symmetric(
-                horizontal: 10,
-              ), // Reducido de 15
+              height: 45, // Reducción de altura
+              padding: const EdgeInsets.symmetric(horizontal: 12),
               decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(
-                  15,
-                ), // Reducido de 20 para ser más profesional
+                color: Theme.of(context).cardColor,
+                borderRadius: BorderRadius.circular(15),
                 boxShadow: [
                   BoxShadow(
                     color: Colors.black.withValues(alpha: 0.05),
@@ -691,27 +1043,195 @@ class _PanelPrincipalState extends State<PanelPrincipal>
                 ],
               ),
               child: TextField(
-                onChanged: (val) => setState(() => _filtroTicket = val),
+                onChanged: (val) => setState(() {
+                  _filtroTicket = val;
+                  _paginaActual = 1;
+                }),
+                textAlignVertical: TextAlignVertical.center,
                 decoration: const InputDecoration(
-                  hintText: "Buscar por ticket...",
+                  hintText: "Buscar ticket...",
                   hintStyle: TextStyle(color: Colors.grey, fontSize: 13),
                   prefixIcon: Icon(
                     Icons.search_rounded,
                     color: AppColors.secondary,
+                    size: 20,
                   ),
                   border: InputBorder.none,
-                  contentPadding: EdgeInsets.symmetric(
-                    vertical: 12,
-                  ), // Ajuste interno
+                  contentPadding: EdgeInsets.zero,
                 ),
               ),
             ),
           ),
 
-          // --- FILTROS HORIZONTALES ---
+          // --- FILTROS DE TIEMPO (Compactos e integrados) ---
           SingleChildScrollView(
             scrollDirection: Axis.horizontal,
-            padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 10),
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 4),
+            child: Row(
+              children: [
+                ...["Hoy", "Esta Semana", "Este Mes"].map((r) {
+                  final isSelected = _filtroRangoTiempo == r;
+                  final isDark =
+                      Theme.of(context).brightness == Brightness.dark;
+
+                  return Padding(
+                    padding: const EdgeInsets.only(right: 6),
+                    child: ChoiceChip(
+                      label: Text(r),
+                      selected: isSelected,
+                      onSelected: (val) {
+                        setState(() {
+                          if (val) {
+                            _filtroRangoTiempo = r;
+                          } else {
+                            _filtroRangoTiempo = "Todo";
+                          }
+                          _paginaActual = 1;
+                        });
+                      },
+                      selectedColor: Colors.cyan.withValues(alpha: 0.15),
+                      backgroundColor: Colors.transparent,
+                      checkmarkColor: isDark
+                          ? Colors.cyanAccent
+                          : Colors.cyan.shade800,
+                      labelStyle: TextStyle(
+                        fontSize: 11,
+                        color: isSelected
+                            ? (isDark
+                                  ? Colors.cyanAccent
+                                  : Colors.cyan.shade800)
+                            : (isDark ? Colors.white70 : Colors.blueGrey),
+                        fontWeight: isSelected
+                            ? FontWeight.bold
+                            : FontWeight.normal,
+                      ),
+                      shape: StadiumBorder(
+                        side: BorderSide(
+                          color: isSelected
+                              ? Colors.cyan.withValues(alpha: 0.5)
+                              : (isDark ? Colors.white12 : Colors.black12),
+                        ),
+                      ),
+                    ),
+                  );
+                }),
+
+                // Chip de Calendario (Con botón de limpiar)
+                AnimatedContainer(
+                  duration: const Duration(milliseconds: 200),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      ChoiceChip(
+                        avatar: Icon(
+                          Icons.date_range_rounded,
+                          size: 14,
+                          color: _filtroRangoTiempo == "Personalizado"
+                              ? (Theme.of(context).brightness == Brightness.dark
+                                    ? Colors.cyanAccent
+                                    : Colors.cyan.shade800)
+                              : Colors.blueGrey,
+                        ),
+                        label: Text(
+                          _filtroRangoTiempo == "Personalizado" &&
+                                  _customDateRange != null
+                              ? "${_customDateRange!.start.day}/${_customDateRange!.start.month} - ${_customDateRange!.end.day}/${_customDateRange!.end.month}"
+                              : "Filtro",
+                        ),
+                        selected: _filtroRangoTiempo == "Personalizado",
+                        onSelected: (val) async {
+                          if (!val) {
+                            setState(() {
+                              _filtroRangoTiempo = "Todo";
+                              _customDateRange = null;
+                              _paginaActual = 1;
+                            });
+                            return;
+                          }
+                          final picked = await showDateRangePicker(
+                            context: context,
+                            firstDate: DateTime(2023),
+                            lastDate: DateTime.now().add(
+                              const Duration(days: 1),
+                            ),
+                            initialDateRange: _customDateRange,
+                          );
+                          if (picked != null) {
+                            setState(() {
+                              _customDateRange = picked;
+                              _filtroRangoTiempo = "Personalizado";
+                              _paginaActual = 1;
+                            });
+                          }
+                        },
+                        selectedColor: Colors.cyan.withValues(alpha: 0.15),
+                        backgroundColor: Colors.transparent,
+                        checkmarkColor:
+                            Theme.of(context).brightness == Brightness.dark
+                            ? Colors.cyanAccent
+                            : Colors.cyan.shade800,
+                        labelStyle: TextStyle(
+                          fontSize: 11,
+                          color: _filtroRangoTiempo == "Personalizado"
+                              ? (Theme.of(context).brightness == Brightness.dark
+                                    ? Colors.cyanAccent
+                                    : Colors.cyan.shade800)
+                              : (Theme.of(context).brightness == Brightness.dark
+                                    ? Colors.white70
+                                    : Colors.blueGrey),
+                          fontWeight: _filtroRangoTiempo == "Personalizado"
+                              ? FontWeight.bold
+                              : FontWeight.normal,
+                        ),
+                        shape: StadiumBorder(
+                          side: BorderSide(
+                            color: _filtroRangoTiempo == "Personalizado"
+                                ? Colors.cyan.withValues(alpha: 0.5)
+                                : (Theme.of(context).brightness ==
+                                          Brightness.dark
+                                      ? Colors.white12
+                                      : Colors.black12),
+                          ),
+                        ),
+                      ),
+                      if (_filtroRangoTiempo == "Personalizado" &&
+                          _customDateRange != null)
+                        Padding(
+                          padding: const EdgeInsets.only(left: 4),
+                          child: InkWell(
+                            onTap: () {
+                              setState(() {
+                                _customDateRange = null;
+                                _filtroRangoTiempo = "Hoy";
+                                _paginaActual = 1;
+                              });
+                            },
+                            borderRadius: BorderRadius.circular(10),
+                            child: Container(
+                              padding: const EdgeInsets.all(4),
+                              decoration: BoxDecoration(
+                                color: Colors.red.withValues(alpha: 0.1),
+                                shape: BoxShape.circle,
+                              ),
+                              child: const Icon(
+                                Icons.close_rounded,
+                                size: 14,
+                                color: Colors.red,
+                              ),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          // --- FILTROS DE ESTADO ---
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 5),
             child: Row(
               children: [
                 _buildFilterChip("Todos"),
@@ -726,170 +1246,242 @@ class _PanelPrincipalState extends State<PanelPrincipal>
             stream: _dbService.streamPedidos(
               filtroEstado: _filtroEstado,
               filtroTicket: _filtroTicket,
+              fechaInicio: start,
+              fechaFin: end,
             ),
             builder: (context, snapshot) {
+              if (snapshot.hasError) {
+                return _buildErrorState(snapshot.error.toString());
+              }
               if (snapshot.connectionState == ConnectionState.waiting) {
                 return const Padding(
                   padding: EdgeInsets.all(40),
                   child: Center(child: CircularProgressIndicator()),
                 );
               }
-              final pedidos = snapshot.data ?? [];
-              if (pedidos.isEmpty) {
+
+              final allPedidos = snapshot.data ?? [];
+              if (allPedidos.isEmpty) {
                 return const Padding(
                   padding: EdgeInsets.all(40),
                   child: Center(child: Text("Sin resultados")),
                 );
               }
 
-              return ListView.builder(
-                padding: const EdgeInsets.all(15),
-                itemCount: pedidos.length,
-                shrinkWrap: true,
-                physics: const NeverScrollableScrollPhysics(),
-                itemBuilder: (context, index) {
-                  final pedido = pedidos[index];
-                  return comp.PedidoCard(
-                    pedido: pedido,
-                    onTap: () => _mostrarDetalleCompleto(
-                      context,
-                      pedido,
-                      rolActual,
-                      nombreCompleto,
-                      sF,
-                      sC,
-                      bF,
-                      bC,
-                    ),
-                    trailingActions: pedido.estado == 'Pendiente'
-                        ? Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              _buildActionButton(
-                                Icons.cancel_outlined,
-                                Colors.red,
-                                () async {
-                                  final confirmar =
-                                      await _mostrarDialogoConfirmacion(
-                                        context,
-                                        "¿Está seguro de que desea CANCELAR este pedido?",
-                                        "Esta acción no se puede deshacer.",
-                                        Colors.red,
-                                      );
-                                  if (confirmar == true) {
-                                    try {
-                                      await _dbService.cancelarPedido(
-                                        pedido.id,
-                                        cantSaco: pedido.cantSaco,
-                                        cantBolsa: pedido.cantBolsa,
-                                      );
-                                      if (!context.mounted) return;
-                                      _notificarExito(
-                                        "Pedido #${pedido.ticket} cancelado",
-                                      );
-                                    } catch (e) {
-                                      if (!context.mounted) return;
-                                      ScaffoldMessenger.of(
-                                        context,
-                                      ).showSnackBar(
-                                        SnackBar(
-                                          content: Text(
-                                            "Error al cancelar: ${e.toString().replaceAll('Exception: ', '')}",
-                                          ),
-                                          backgroundColor: Colors.red,
-                                          behavior: SnackBarBehavior.floating,
-                                          shape: RoundedRectangleBorder(
-                                            borderRadius: BorderRadius.circular(
-                                              15,
-                                            ),
-                                          ),
-                                        ),
-                                      );
-                                    }
-                                  }
-                                },
+              // Paginación Manual (Client Side)
+              final startIndex = (_paginaActual - 1) * _itemsPorPagina;
+              final paginatedPedidos = allPedidos
+                  .skip(startIndex)
+                  .take(_itemsPorPagina)
+                  .toList();
+              final totalPaginas = (allPedidos.length / _itemsPorPagina).ceil();
+
+              return Column(
+                children: [
+                  LayoutBuilder(
+                    builder: (context, gridConstraints) {
+                      final bool isWide = gridConstraints.maxWidth > 800;
+                      if (isWide && _disenoCompacto) {
+                        return GridView.builder(
+                          key: const PageStorageKey("pedidos_grid_view"),
+                          shrinkWrap: true,
+                          physics: const NeverScrollableScrollPhysics(),
+                          padding: const EdgeInsets.all(15),
+                          gridDelegate:
+                              const SliverGridDelegateWithMaxCrossAxisExtent(
+                                maxCrossAxisExtent: 600,
+                                crossAxisSpacing: 12,
+                                mainAxisSpacing: 12,
+                                mainAxisExtent: 155,
                               ),
-                              const SizedBox(width: 8),
-                              ElevatedButton(
-                                style: ElevatedButton.styleFrom(
-                                  backgroundColor: Colors.green,
-                                  foregroundColor: Colors.white,
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 12,
-                                  ),
-                                  shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(15),
-                                  ),
-                                  elevation: 0,
+                          itemCount: paginatedPedidos.length,
+                          itemBuilder: (context, index) {
+                            final pedido = paginatedPedidos[index];
+                            return comp.PedidoCard(
+                              pedido: pedido,
+                              onTap: () => _mostrarDetalleCompleto(
+                                context,
+                                pedido,
+                                rolActual,
+                                nombreCompleto,
+                                sF,
+                                sC,
+                                bF,
+                                bC,
+                              ),
+                              fullWidth: _disenoPedidosLargo,
+                              trailingActions: pedido.estado == 'Pendiente'
+                                  ? _buildPedidoAcciones(
+                                      pedido,
+                                      rolActual,
+                                      nombreCompleto,
+                                    )
+                                  : null,
+                            );
+                          },
+                        );
+                      } else {
+                        // DISEÑO ANCHO (Por defecto o si es móvil)
+                        return Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 15,
+                            vertical: 10,
+                          ),
+                          child: Column(
+                            children: paginatedPedidos.map((pedido) {
+                              return comp.PedidoCard(
+                                pedido: pedido,
+                                onTap: () => _mostrarDetalleCompleto(
+                                  context,
+                                  pedido,
+                                  rolActual,
+                                  nombreCompleto,
+                                  sF,
+                                  sC,
+                                  bF,
+                                  bC,
                                 ),
-                                onPressed: () async {
-                                  final confirmar =
-                                      await _mostrarDialogoConfirmacion(
-                                        context,
-                                        "¿Está seguro de que desea DESPACHAR este pedido?",
-                                        "Se descontará del inventario físico.",
-                                        Colors.green,
-                                      );
-                                  if (confirmar == true) {
-                                    try {
-                                      await _dbService.despacharPedido(
-                                        pedido.id,
+                                fullWidth: _disenoPedidosLargo,
+                                trailingActions: pedido.estado == 'Pendiente'
+                                    ? _buildPedidoAcciones(
+                                        pedido,
+                                        rolActual,
                                         nombreCompleto,
-                                        cantSaco: pedido.cantSaco,
-                                        cantBolsa: pedido.cantBolsa,
-                                      );
-                                      if (!context.mounted) return;
-                                      _notificarExito(
-                                        "Pedido #${pedido.ticket} despachado con éxito",
-                                      );
-                                    } catch (e) {
-                                      if (!context.mounted) return;
-                                      ScaffoldMessenger.of(
-                                        context,
-                                      ).showSnackBar(
-                                        SnackBar(
-                                          content: Text(
-                                            e.toString().replaceAll(
-                                              'Exception: ',
-                                              '',
-                                            ),
-                                          ),
-                                          backgroundColor: Colors.red,
-                                          behavior: SnackBarBehavior.floating,
-                                          shape: RoundedRectangleBorder(
-                                            borderRadius: BorderRadius.circular(
-                                              15,
-                                            ),
-                                          ),
-                                        ),
-                                      );
-                                    }
-                                  } else {
-                                    if (!context.mounted) return;
-                                    _mostrarMensaje(
-                                      "Acción cancelada",
-                                      esError: true,
-                                    );
-                                  }
-                                },
-                                child: const Text(
-                                  "Despachar",
-                                  style: TextStyle(
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
+                                      )
+                                    : null,
+                              );
+                            }).toList(),
+                          ),
+                        );
+                      }
+                    },
+                  ),
+
+                  if (totalPaginas > 1)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 20),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          IconButton(
+                            icon: const Icon(Icons.chevron_left_rounded),
+                            onPressed: _paginaActual > 1
+                                ? () => setState(() => _paginaActual--)
+                                : null,
+                          ),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 4,
+                            ),
+                            decoration: BoxDecoration(
+                              color: AppColors.primary.withValues(alpha: 0.1),
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: Text(
+                              "Página $_paginaActual de $totalPaginas",
+                              style: const TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 13,
                               ),
-                            ],
-                          )
-                        : null,
-                  );
-                },
+                            ),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.chevron_right_rounded),
+                            onPressed: _paginaActual < totalPaginas
+                                ? () => setState(() => _paginaActual++)
+                                : null,
+                          ),
+                        ],
+                      ),
+                    ),
+                ],
               );
             },
           ),
         ],
       ),
+    );
+  }
+
+  Widget _buildErrorState(String error) {
+    return Padding(
+      padding: const EdgeInsets.all(40),
+      child: Center(
+        child: Column(
+          children: [
+            const Icon(Icons.error_outline, color: Colors.orange),
+            const SizedBox(height: 10),
+            Text(
+              "Error: $error",
+              style: const TextStyle(color: Colors.orange, fontSize: 12),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPedidoAcciones(
+    Pedido pedido,
+    String rolActual,
+    String nombreCompleto,
+  ) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _buildActionButton(Icons.cancel_outlined, Colors.red, () async {
+          final conf = await _mostrarDialogoConfirmacion(
+            context,
+            "¿CANCELAR pedido?",
+            "No se puede deshacer.",
+            Colors.red,
+          );
+          if (conf == true) {
+            await _dbService.cancelarPedido(
+              pedido.id,
+              cantSaco: pedido.cantSaco,
+              cantBolsa: pedido.cantBolsa,
+            );
+            _notificarExito("Pedido cancelado");
+          }
+        }),
+        const SizedBox(width: 8),
+        ElevatedButton(
+          style: ElevatedButton.styleFrom(
+            backgroundColor: Colors.green,
+            foregroundColor: Colors.white,
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(15),
+            ),
+            elevation: 0,
+          ),
+          onPressed: () async {
+            final conf = await _mostrarDialogoConfirmacion(
+              context,
+              "¿DESPACHAR pedido?",
+              "Se descontará del inventario.",
+              Colors.green,
+            );
+            if (conf == true) {
+              await _dbService.despacharPedido(
+                pedido.id,
+                nombreCompleto,
+                rolActual,
+                cantSaco: pedido.cantSaco,
+                cantBolsa: pedido.cantBolsa,
+              );
+              _notificarExito("Pedido despachado");
+            }
+          },
+          child: const Text(
+            "Despachar",
+            style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+          ),
+        ),
+      ],
     );
   }
 
@@ -932,6 +1524,8 @@ class _PanelPrincipalState extends State<PanelPrincipal>
             pedidos: pedidoSnap.data ?? [],
             stockSacoDisp: sacoDisp,
             stockBolsaDisp: bolsaDisp,
+            pedidosFullWidth:
+                true, // Forzamos full width para optimizar espacio como en la imagen
             onDespachar: (pedido) async {
               final confirmar = await _mostrarDialogoConfirmacion(
                 context,
@@ -944,6 +1538,7 @@ class _PanelPrincipalState extends State<PanelPrincipal>
                   await _dbService.despacharPedido(
                     pedido.id,
                     nombreCompleto,
+                    rolActual,
                     cantSaco: pedido.cantSaco,
                     cantBolsa: pedido.cantBolsa,
                   );
@@ -995,32 +1590,67 @@ class _PanelPrincipalState extends State<PanelPrincipal>
       child: Column(
         children: [
           Padding(
-            padding: const EdgeInsets.all(15),
+            padding: const EdgeInsets.fromLTRB(20, 15, 20, 15),
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                const Text(
-                  "Agenda de hoy",
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      "Agenda de hoy",
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    Text(
+                      "${_selectedDate.day}/${_selectedDate.month}/${_selectedDate.year}",
+                      style: const TextStyle(fontSize: 12, color: Colors.grey),
+                    ),
+                  ],
                 ),
-                IconButton(
-                  icon: const Icon(Icons.calendar_today),
-                  onPressed: () async {
-                    final picked = await showDatePicker(
-                      context: context,
-                      initialDate: _selectedDate,
-                      firstDate: DateTime(2000),
-                      lastDate: DateTime(2100),
-                    );
-                    if (picked != null) {
-                      setState(() {
-                        _selectedDate = picked;
-                        _citasStream = _dbService.streamCitasDelDia(
-                          _selectedDate,
+                Row(
+                  children: [
+                    if (_selectedDate.day != DateTime.now().day ||
+                        _selectedDate.month != DateTime.now().month ||
+                        _selectedDate.year != DateTime.now().year)
+                      TextButton(
+                        onPressed: () {
+                          setState(() {
+                            _selectedDate = DateTime(
+                              DateTime.now().year,
+                              DateTime.now().month,
+                              DateTime.now().day,
+                            );
+                            _citasStream = _dbService.streamCitasDelDia(
+                              _selectedDate,
+                            );
+                          });
+                        },
+                        child: const Text("Hoy"),
+                      ),
+                    IconButton(
+                      icon: const Icon(Icons.calendar_month_rounded),
+                      color: AppColors.secondary,
+                      onPressed: () async {
+                        final picked = await showDatePicker(
+                          context: context,
+                          initialDate: _selectedDate,
+                          firstDate: DateTime(2000),
+                          lastDate: DateTime(2100),
                         );
-                      });
-                    }
-                  },
+                        if (picked != null) {
+                          setState(() {
+                            _selectedDate = picked;
+                            _citasStream = _dbService.streamCitasDelDia(
+                              _selectedDate,
+                            );
+                          });
+                        }
+                      },
+                    ),
+                  ],
                 ),
               ],
             ),
@@ -1028,6 +1658,35 @@ class _PanelPrincipalState extends State<PanelPrincipal>
           StreamBuilder<List<Cita>>(
             stream: _citasStream,
             builder: (context, snapshot) {
+              if (snapshot.hasError) {
+                return Padding(
+                  padding: const EdgeInsets.all(20),
+                  child: Column(
+                    children: [
+                      const Icon(Icons.error_outline, color: Colors.red),
+                      const SizedBox(height: 10),
+                      Text(
+                        "Error en la agenda: ${snapshot.error}",
+                        style: const TextStyle(color: Colors.red, fontSize: 12),
+                        textAlign: TextAlign.center,
+                      ),
+                      if (snapshot.error.toString().contains("index"))
+                        const Padding(
+                          padding: EdgeInsets.only(top: 8),
+                          child: Text(
+                            "Falta crear el índice compuesto en Firebase.",
+                            style: TextStyle(
+                              color: Colors.orange,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                );
+              }
+
               final citas = snapshot.data ?? [];
 
               // Lógica de sincronización automática (Validación de pedidos)
@@ -1113,24 +1772,17 @@ class _PanelPrincipalState extends State<PanelPrincipal>
       margin: const EdgeInsets.only(bottom: 8),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
       child: ListTile(
-        onTap: () async {
-          if (cita.idPedido != null && cita.idPedido!.isNotEmpty) {
-            final p = await _dbService.getPedidoById(cita.idPedido!);
-            if (p != null && mounted) {
-              _mostrarDetalleCompleto(
-                context,
-                p,
-                rolActual,
-                nombreCompleto,
-                sF,
-                sC,
-                bF,
-                bC,
-              );
-            }
-          } else {
-            _mostrarDialogoCita(slotTime, cita);
-          }
+        onTap: () {
+          _mostrarDialogoCita(
+            slotTime,
+            cita,
+            rolActual: rolActual,
+            nombreCompleto: nombreCompleto,
+            sF: sF,
+            sC: sC,
+            bF: bF,
+            bC: bC,
+          );
         },
         leading: Container(
           width: 60,
@@ -1177,71 +1829,206 @@ class _PanelPrincipalState extends State<PanelPrincipal>
                 : Icons.add_circle_outline,
           ),
           color: ocupado ? colorEtiqueta : Colors.cyan,
-          onPressed: () => _mostrarDialogoCita(slotTime, cita),
+          onPressed: () => _mostrarDialogoCita(
+            slotTime,
+            cita,
+            rolActual: rolActual,
+            nombreCompleto: nombreCompleto,
+            sF: sF,
+            sC: sC,
+            bF: bF,
+            bC: bC,
+          ),
         ),
       ),
     );
   }
 
-  void _mostrarDialogoCita(String slot, Cita cita) {
+  void _mostrarDialogoCita(
+    String slot,
+    Cita cita, {
+    String rolActual = 'Empleado',
+    String nombreCompleto = '',
+    int sF = 0,
+    int sC = 0,
+    int bF = 0,
+    int bC = 0,
+  }) {
+    // ─── CITA EXISTENTE ───
     if (cita.id.isNotEmpty) {
+      final bool puedeGestionar =
+          rolActual == 'admin' || rolActual == 'supervisor';
+
       showDialog(
         context: context,
-        builder: (context) => AlertDialog(
-          title: Text("Pedido Agendado - $slot"),
+        builder: (dialogCtx) => AlertDialog(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(20),
+          ),
+          title: Row(
+            children: [
+              const Icon(Icons.event_available, color: AppColors.secondary),
+              const SizedBox(width: 10),
+              Text(
+                "Cita – $slot",
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
+            ],
+          ),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                "Cliente: ${cita.nombreCliente ?? cita.nombre}",
-                style: const TextStyle(
-                  fontWeight: FontWeight.bold,
-                  fontSize: 16,
+              _buildInfoRow(
+                Icons.person,
+                "Cliente",
+                cita.nombreCliente ?? cita.nombre,
+              ),
+              _buildInfoRow(Icons.notes, "Nota", cita.motivo),
+              _buildInfoRow(
+                Icons.flag,
+                "Estado",
+                cita.estadoAgendado ? '✅ Retirado' : '⏳ Pendiente de retiro',
+              ),
+              if (cita.idPedido != null)
+                _buildInfoRow(
+                  Icons.link,
+                  "Pedido",
+                  "Ticket vinculado (#${cita.idPedido!.substring(0, 6)}…)",
                 ),
-              ),
-              const SizedBox(height: 10),
-              Text("Nota: ${cita.motivo}"),
-              const SizedBox(height: 5),
-              Text(
-                "Estado: ${cita.estadoAgendado ? 'Completado (Buscado)' : 'Pendiente (Por buscar)'}",
-              ),
             ],
           ),
           actions: [
-            if (!cita.estadoAgendado)
-              ElevatedButton(
+            // ── Cancelar cita (solo admin/supervisor) ──
+            if (puedeGestionar)
+              TextButton.icon(
+                icon: const Icon(Icons.delete_outline, color: Colors.red),
+                label: const Text(
+                  "Cancelar Cita",
+                  style: TextStyle(color: Colors.red),
+                ),
                 onPressed: () async {
+                  final confirm = await showDialog<bool>(
+                    context: dialogCtx,
+                    builder: (c) => AlertDialog(
+                      title: const Text("¿Cancelar esta cita?"),
+                      content: const Text(
+                        "Esto eliminará la cita de la agenda. El pedido asociado NO se cancelará automáticamente.",
+                      ),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.pop(c, false),
+                          child: const Text("No"),
+                        ),
+                        ElevatedButton(
+                          onPressed: () => Navigator.pop(c, true),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.red,
+                          ),
+                          child: const Text(
+                            "Sí, cancelar",
+                            style: TextStyle(color: Colors.white),
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                  if (confirm == true) {
+                    try {
+                      await _dbService.cancelarCita(
+                        cita.id,
+                        motivo: 'Cancelada por $nombreCompleto',
+                      );
+                      if (dialogCtx.mounted) Navigator.pop(dialogCtx);
+                      if (mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text("Cita cancelada"),
+                            backgroundColor: Colors.red,
+                          ),
+                        );
+                      }
+                    } catch (e) {
+                      if (mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text("Error: $e"),
+                            backgroundColor: Colors.red,
+                          ),
+                        );
+                      }
+                    }
+                  }
+                },
+              ),
+
+            // ── Reagendar cita (solo admin/supervisor) ──
+            if (puedeGestionar)
+              TextButton.icon(
+                icon: const Icon(Icons.edit_calendar, color: Colors.orange),
+                label: const Text(
+                  "Reagendar",
+                  style: TextStyle(color: Colors.orange),
+                ),
+                onPressed: () async {
+                  Navigator.pop(dialogCtx);
+                  _mostrarDialogoReagendar(cita);
+                },
+              ),
+
+            // ── Marcar como Retirado ──
+            if (!cita.estadoAgendado)
+              ElevatedButton.icon(
+                icon: const Icon(Icons.check_circle_outline),
+                label: const Text("Marcar como Retirado"),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.green,
+                  foregroundColor: Colors.white,
+                ),
+                onPressed: () async {
+                  // Si tiene pedido vinculado, obtenemos cantidades para despachar
+                  int cantS = 0, cantB = 0;
+                  if (cita.idPedido != null) {
+                    final p = await _dbService.getPedidoById(cita.idPedido!);
+                    if (p != null) {
+                      cantS = p.cantSaco;
+                      cantB = p.cantBolsa;
+                    }
+                  }
                   try {
-                    await _dbService.actualizarEstadoAgendado(cita.id, true);
-                    if (context.mounted) {
-                      Navigator.pop(context);
+                    await _dbService.marcarCitaComoRetirada(
+                      idCita: cita.id,
+                      idPedido: cita.idPedido,
+                      despachadorNombre: nombreCompleto,
+                      despachadorRol: rolActual,
+                      cantSaco: cantS,
+                      cantBolsa: cantB,
+                    );
+                    if (dialogCtx.mounted) Navigator.pop(dialogCtx);
+                    if (mounted) {
                       ScaffoldMessenger.of(context).showSnackBar(
                         const SnackBar(
-                          content: Text("Cita marcada como buscada"),
+                          content: Text(
+                            "✅ Cita marcada como retirada y pedido despachado",
+                          ),
                           backgroundColor: Colors.green,
                         ),
                       );
                     }
                   } catch (e) {
-                    if (context.mounted) {
+                    if (mounted) {
                       ScaffoldMessenger.of(context).showSnackBar(
                         SnackBar(
-                          content: Text("Error al actualizar cita: $e"),
+                          content: Text("Error: $e"),
                           backgroundColor: Colors.red,
                         ),
                       );
                     }
                   }
                 },
-                style: ElevatedButton.styleFrom(backgroundColor: Colors.green),
-                child: const Text(
-                  "Marcar como Buscado",
-                  style: TextStyle(color: Colors.white),
-                ),
               ),
             TextButton(
-              onPressed: () => Navigator.pop(context),
+              onPressed: () => Navigator.pop(dialogCtx),
               child: const Text("Cerrar"),
             ),
           ],
@@ -1250,105 +2037,146 @@ class _PanelPrincipalState extends State<PanelPrincipal>
       return;
     }
 
-    // --- FORMULARIO PARA AGENDAR ---
+    // ─── FORMULARIO PARA AGENDAR ───
     String? idPedidoSel;
     String? idClienteSel;
     String? nombreClienteSel;
-    final motivoCtrl = TextEditingController(text: "Retiro de pedido");
+    final motivoCtrl = TextEditingController(); // vacío, sin texto predefinido
 
     showDialog(
       context: context,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setModalState) => AlertDialog(
-          title: Text("Agendar Retiro ($slot)"),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (stfContext, setModalState) => AlertDialog(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(20),
+          ),
+          title: Row(
             children: [
-              const Text(
-                "Selecciona un pedido pendiente:",
-                style: TextStyle(fontSize: 12, color: Colors.grey),
-              ),
-              const SizedBox(height: 10),
-              StreamBuilder<QuerySnapshot>(
-                stream: FirebaseFirestore.instance
-                    .collection('Pedidos')
-                    .where('estado', isEqualTo: 'Pendiente')
-                    .snapshots(),
-                builder: (context, snapshot) {
-                  if (!snapshot.hasData) return const LinearProgressIndicator();
-                  final pedidos = snapshot.data!.docs;
-                  return DropdownButtonFormField<String>(
-                    isExpanded: true,
-                    initialValue: idPedidoSel,
-                    hint: const Text("Elegir Pedido"),
-                    items: pedidos.map((p) {
-                      final d = p.data() as Map<String, dynamic>;
-                      return DropdownMenuItem(
-                        value: p.id,
-                        child: Text(
-                          "Ticket: ${d['N_ticket']} (${d['tipo_hielo']?['categoria']})",
-                          style: const TextStyle(fontSize: 12),
-                        ),
-                      );
-                    }).toList(),
-                    onChanged: (val) async {
-                      final pDoc = pedidos.firstWhere((p) => p.id == val);
-                      final pData = pDoc.data() as Map<String, dynamic>;
-                      final String? idC = pData['id_cliente'];
-
-                      String nC = "Cliente Genérico";
-                      if (idC != null) {
-                        final cDoc = await FirebaseFirestore.instance
-                            .collection('Clientes')
-                            .doc(idC)
-                            .get();
-                        if (cDoc.exists) {
-                          final cData = cDoc.data()!;
-                          nC = "${cData['Nombre']} ${cData['Apellido']}";
-                        }
-                      }
-
-                      setModalState(() {
-                        idPedidoSel = val;
-                        idClienteSel = idC;
-                        nombreClienteSel = nC;
-                      });
-                    },
-                  );
-                },
-              ),
-              if (nombreClienteSel != null) ...[
-                const SizedBox(height: 15),
-                Container(
-                  padding: const EdgeInsets.all(10),
-                  decoration: BoxDecoration(
-                    color: Colors.green.withValues(alpha: 0.1),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Row(
-                    children: [
-                      const Icon(Icons.person, color: Colors.green, size: 18),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          "Cliente: $nombreClienteSel",
-                          style: const TextStyle(fontWeight: FontWeight.bold),
-                        ),
-                      ),
-                    ],
+              const Icon(Icons.event_note, color: AppColors.secondary),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  "Agendar Retiro ($slot)",
+                  style: const TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
                   ),
                 ),
-              ],
-              const SizedBox(height: 15),
-              TextField(
-                controller: motivoCtrl,
-                decoration: const InputDecoration(labelText: "Nota opcional"),
               ),
             ],
           ),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  "Selecciona un pedido pendiente:",
+                  style: TextStyle(fontSize: 12, color: Colors.grey),
+                ),
+                const SizedBox(height: 10),
+                StreamBuilder<QuerySnapshot>(
+                  stream: FirebaseFirestore.instance
+                      .collection('Pedidos')
+                      .where('estado', isEqualTo: 'Pendiente')
+                      .snapshots(),
+                  builder: (streamCtx, snapshot) {
+                    if (!snapshot.hasData) {
+                      return const LinearProgressIndicator();
+                    }
+                    final pedidos = snapshot.data!.docs;
+
+                    if (pedidos.isEmpty) {
+                      return const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 20),
+                        child: Text(
+                          "No hay pedidos pendientes para agendar retiro.",
+                          style: TextStyle(
+                            color: Colors.orange,
+                            fontWeight: FontWeight.bold,
+                          ),
+                          textAlign: TextAlign.center,
+                        ),
+                      );
+                    }
+
+                    return DropdownButtonFormField<String>(
+                      isExpanded: true,
+                      initialValue: idPedidoSel,
+                      hint: const Text("Elegir Pedido"),
+                      items: pedidos.map((p) {
+                        final d = p.data() as Map<String, dynamic>;
+                        return DropdownMenuItem(
+                          value: p.id,
+                          child: Text(
+                            "Ticket: ${d['N_ticket']} (${d['tipo_hielo']?['categoria']})",
+                            style: const TextStyle(fontSize: 12),
+                          ),
+                        );
+                      }).toList(),
+                      onChanged: (val) async {
+                        final pDoc = pedidos.firstWhere((p) => p.id == val);
+                        final pData = pDoc.data() as Map<String, dynamic>;
+                        final String? idC = pData['id_cliente'];
+
+                        String nC = "Cliente Genérico";
+                        if (idC != null) {
+                          final cDoc = await FirebaseFirestore.instance
+                              .collection('Clientes')
+                              .doc(idC)
+                              .get();
+                          if (cDoc.exists) {
+                            final cData = cDoc.data()!;
+                            nC = "${cData['Nombre']} ${cData['Apellido']}";
+                          }
+                        }
+
+                        setModalState(() {
+                          idPedidoSel = val;
+                          idClienteSel = idC;
+                          nombreClienteSel = nC;
+                        });
+                      },
+                    );
+                  },
+                ),
+                if (nombreClienteSel != null) ...[
+                  const SizedBox(height: 15),
+                  Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: Colors.green.withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.person, color: Colors.green, size: 18),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            "Cliente: $nombreClienteSel",
+                            style: const TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 15),
+                // ── FIX: placeholder correcto, campo vacío ──
+                TextField(
+                  controller: motivoCtrl,
+                  decoration: const InputDecoration(
+                    labelText: "Nota opcional",
+                    hintText: "Ej: Retiro de pedido",
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+              ],
+            ),
+          ),
           actions: [
             TextButton(
-              onPressed: () => Navigator.pop(context),
+              onPressed: () => Navigator.pop(dialogContext),
               child: const Text("Cancelar"),
             ),
             ElevatedButton(
@@ -1357,10 +2185,16 @@ class _PanelPrincipalState extends State<PanelPrincipal>
                   : () async {
                       try {
                         final nuevaCita = Cita(
-                          id: '', // Firestore genera el ID
+                          id: '',
                           nombre: nombreClienteSel ?? "Cliente",
-                          motivo: motivoCtrl.text,
-                          fecha: _selectedDate,
+                          motivo: motivoCtrl.text.isEmpty
+                              ? "Retiro de pedido"
+                              : motivoCtrl.text,
+                          fecha: DateTime(
+                            _selectedDate.year,
+                            _selectedDate.month,
+                            _selectedDate.day,
+                          ),
                           slot: slot,
                           idPedido: idPedidoSel,
                           idCliente: idClienteSel,
@@ -1369,17 +2203,23 @@ class _PanelPrincipalState extends State<PanelPrincipal>
 
                         await _dbService.agendarCita(nuevaCita);
 
-                        if (context.mounted) {
-                          Navigator.pop(context);
+                        if (dialogContext.mounted) {
+                          Navigator.pop(dialogContext);
+                        }
+                        if (mounted) {
                           ScaffoldMessenger.of(context).showSnackBar(
                             const SnackBar(
-                              content: Text("Cita agendada con éxito"),
+                              content: Text("✅ Cita agendada con éxito"),
                               backgroundColor: Colors.green,
                             ),
                           );
                         }
                       } catch (e) {
-                        if (context.mounted) {
+                        _dbService.registrarErrorSistema(
+                          contexto: "Agendar Cita ($slot)",
+                          error: e.toString(),
+                        );
+                        if (mounted) {
                           ScaffoldMessenger.of(context).showSnackBar(
                             SnackBar(
                               content: Text("Error al agendar cita: $e"),
@@ -1397,7 +2237,351 @@ class _PanelPrincipalState extends State<PanelPrincipal>
     );
   }
 
+  /// Widget helper para mostrar filas de información en el diálogo de cita
+  Widget _buildInfoRow(IconData icon, String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 5),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, size: 16, color: Colors.blueGrey),
+          const SizedBox(width: 8),
+          Expanded(
+            child: RichText(
+              text: TextSpan(
+                style: DefaultTextStyle.of(context).style,
+                children: [
+                  TextSpan(
+                    text: "$label: ",
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 13,
+                    ),
+                  ),
+                  TextSpan(text: value, style: const TextStyle(fontSize: 13)),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Diálogo para reagendar una cita existente a otra fecha y hora
+  void _mostrarDialogoReagendar(Cita cita) async {
+    DateTime nuevaFecha = cita.fecha;
+    String nuevoSlot = cita.slot;
+
+    // Posibles slots disponibles (08:00 a 15:50, cada 10 min)
+    final List<String> slots = List.generate(48, (i) {
+      final total = 8 * 60 + i * 10;
+      final h = (total ~/ 60).toString().padLeft(2, '0');
+      final m = (total % 60).toString().padLeft(2, '0');
+      return "$h:$m";
+    });
+
+    showDialog(
+      context: context,
+      builder: (dialogCtx) => StatefulBuilder(
+        builder: (ctx, setModalState) => AlertDialog(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(20),
+          ),
+          title: Row(
+            children: [
+              Icon(Icons.edit_calendar, color: Colors.orange),
+              SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  "Reagendar Cita",
+                  style: const TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(
+                  Icons.calendar_today,
+                  color: AppColors.secondary,
+                ),
+                title: Text(
+                  "${nuevaFecha.day}/${nuevaFecha.month}/${nuevaFecha.year}",
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                ),
+                subtitle: const Text("Toca para cambiar la fecha"),
+                onTap: () async {
+                  final picked = await showDatePicker(
+                    context: ctx,
+                    initialDate: nuevaFecha,
+                    firstDate: DateTime.now(),
+                    lastDate: DateTime(2100),
+                  );
+                  if (picked != null) {
+                    setModalState(() => nuevaFecha = picked);
+                  }
+                },
+              ),
+              const Divider(),
+              DropdownButtonFormField<String>(
+                initialValue: nuevoSlot,
+                decoration: const InputDecoration(
+                  labelText: "Nuevo horario",
+                  border: OutlineInputBorder(),
+                ),
+                items: slots
+                    .map((s) => DropdownMenuItem(value: s, child: Text(s)))
+                    .toList(),
+                onChanged: (v) {
+                  if (v != null) setModalState(() => nuevoSlot = v);
+                },
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogCtx),
+              child: const Text("Cancelar"),
+            ),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.orange,
+                foregroundColor: Colors.white,
+              ),
+              onPressed: () async {
+                try {
+                  await _dbService.reagendarCita(
+                    cita.id,
+                    nuevaFecha,
+                    nuevoSlot,
+                  );
+                  if (dialogCtx.mounted) Navigator.pop(dialogCtx);
+                  if (mounted) {
+                    setState(() {
+                      _selectedDate = nuevaFecha;
+                      _citasStream = _dbService.streamCitasDelDia(nuevaFecha);
+                    });
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text("📅 Cita reagendada con éxito"),
+                        backgroundColor: Colors.orange,
+                      ),
+                    );
+                  }
+                } catch (e) {
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text("Error al reagendar: $e"),
+                        backgroundColor: Colors.red,
+                      ),
+                    );
+                  }
+                }
+              },
+              child: const Text("Confirmar Reagendado"),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   // DIALOGO LOGOUT
+  void _mostrarCentroNotificaciones(BuildContext context) {
+    _marcarNotificacionesComoLeidas();
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (context) => Container(
+        height: MediaQuery.of(context).size.height * 0.75,
+        decoration: BoxDecoration(
+          color: Theme.of(context).scaffoldBackgroundColor,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(30)),
+        ),
+        child: Column(
+          children: [
+            // Barra superior del modal
+            Container(
+              margin: const EdgeInsets.symmetric(vertical: 12),
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                color: Colors.blueGrey.withValues(alpha: 0.2),
+                borderRadius: BorderRadius.circular(10),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 25, vertical: 10),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    "Notificaciones",
+                    style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                      fontWeight: FontWeight.bold,
+                      color: AppColors.secondary,
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.close_rounded),
+                    onPressed: () => Navigator.pop(context),
+                  ),
+                ],
+              ),
+            ),
+            const Divider(),
+            Expanded(
+              child: StreamBuilder<List<QueryDocumentSnapshot>>(
+                stream: _dbService.streamNotificaciones(),
+                builder: (context, snapshot) {
+                  if (snapshot.connectionState == ConnectionState.waiting) {
+                    return const Center(child: CircularProgressIndicator());
+                  }
+                  if (!snapshot.hasData || snapshot.data!.isEmpty) {
+                    return Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(
+                            Icons.notifications_off_outlined,
+                            size: 60,
+                            color: Colors.blueGrey.withValues(alpha: 0.3),
+                          ),
+                          const SizedBox(height: 15),
+                          const Text(
+                            "No hay notificaciones recientes",
+                            style: TextStyle(color: Colors.blueGrey),
+                          ),
+                        ],
+                      ),
+                    );
+                  }
+
+                  final logs = snapshot.data!;
+                  return ListView.separated(
+                    padding: const EdgeInsets.fromLTRB(20, 10, 20, 30),
+                    itemCount: logs.length,
+                    separatorBuilder: (context, index) =>
+                        const SizedBox(height: 12),
+                    itemBuilder: (context, index) {
+                      final data = logs[index].data() as Map<String, dynamic>;
+                      final String accion = data['accion'] ?? 'EVENTO';
+                      final String detalle = data['detalle'] ?? '';
+                      final DateTime fecha =
+                          (data['fecha'] as Timestamp?)?.toDate() ??
+                          DateTime.now();
+
+                      // Lógica de iconos temáticos
+                      IconData icon = Icons.info_outline_rounded;
+                      Color color = AppColors.secondary;
+
+                      if (accion.contains('PEDIDO')) {
+                        icon = Icons.receipt_long_rounded;
+                        color = Colors.orange;
+                      } else if (accion.contains('INVENTARIO') ||
+                          accion.contains('STOCK')) {
+                        icon = Icons.inventory_2_outlined;
+                        color = Colors.blue;
+                      } else if (accion.contains('TASA')) {
+                        icon = Icons.currency_exchange_rounded;
+                        color = Colors.green;
+                      } else if (accion.contains('USUARIO')) {
+                        icon = Icons.person_outline_rounded;
+                        color = Colors.purple;
+                      } else if (accion.contains('CLIENTE')) {
+                        icon = Icons.person_add_alt_1_outlined;
+                        color = Colors.teal;
+                      }
+
+                      return Container(
+                        padding: const EdgeInsets.all(15),
+                        decoration: BoxDecoration(
+                          color: Theme.of(context).cardColor,
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(
+                            color: color.withValues(alpha: 0.1),
+                            width: 1,
+                          ),
+                        ),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.all(10),
+                              decoration: BoxDecoration(
+                                color: color.withValues(alpha: 0.1),
+                                shape: BoxShape.circle,
+                              ),
+                              child: Icon(icon, color: color, size: 20),
+                            ),
+                            const SizedBox(width: 15),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Row(
+                                    mainAxisAlignment:
+                                        MainAxisAlignment.spaceBetween,
+                                    children: [
+                                      Text(
+                                        accion.replaceAll('_', ' '),
+                                        style: TextStyle(
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 12,
+                                          color: color,
+                                        ),
+                                      ),
+                                      Text(
+                                        "${fecha.hour}:${fecha.minute.toString().padLeft(2, '0')}",
+                                        style: const TextStyle(
+                                          fontSize: 10,
+                                          color: Colors.blueGrey,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 5),
+                                  Text(
+                                    detalle,
+                                    style: const TextStyle(
+                                      fontSize: 13,
+                                      height: 1.3,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Text(
+                                    "${fecha.day}/${fecha.month}/${fecha.year}",
+                                    style: const TextStyle(
+                                      fontSize: 10,
+                                      color: Colors.grey,
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   void _mostrarConfirmacionLogout(BuildContext context) {
     showDialog(
       context: context,
@@ -1431,13 +2615,13 @@ class _PanelPrincipalState extends State<PanelPrincipal>
   ) {
     return SliverToBoxAdapter(
       child: Padding(
-        padding: const EdgeInsets.all(20),
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 15),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text(
               "Configuraciones",
-              style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 20),
             _buildSettingsTile(
@@ -1459,6 +2643,24 @@ class _PanelPrincipalState extends State<PanelPrincipal>
             ),
             const SizedBox(height: 10),
             _buildSettingsTile(
+              icon: Icons.people_outline_rounded,
+              color: Colors.blue,
+              title: "Gestión de Clientes",
+              subtitle: "Ver, buscar y añadir clientes a la base de datos",
+              onTap: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => _GestionClientesScreen(
+                      dbService: _dbService,
+                      onNuevoCliente: () => _mostrarFormularioCliente(context),
+                    ),
+                  ),
+                );
+              },
+            ),
+            const SizedBox(height: 10),
+            _buildSettingsTile(
               icon: Icons.help_outline_rounded,
               color: AppColors.secondary,
               title: "Centro de Ayuda",
@@ -1470,17 +2672,37 @@ class _PanelPrincipalState extends State<PanelPrincipal>
                 );
               },
             ),
-            if (rolActual == "admin") ...[
+            if (rolActual == "admin" || rolActual == "supervisor") ...[
               const SizedBox(height: 10),
               _buildSettingsTile(
                 icon: Icons.admin_panel_settings_outlined,
                 color: Colors.redAccent,
-                title: "Panel de Control Admin",
-                subtitle: "Gestión avanzada de usuarios y datos",
+                title: rolActual == "admin"
+                    ? "Panel de Control Admin"
+                    : "Panel de Gestión Supervisor",
+                subtitle: rolActual == "admin"
+                    ? "Gestión avanzada de usuarios y datos"
+                    : "Acceso a reportes e inventario",
                 onTap: () => _mostrarPanelAdmin(context, rolActual),
               ),
             ],
-            const Padding(
+            const SizedBox(height: 10),
+            _buildSettingsTile(
+              icon: Icons.settings_applications_rounded,
+              color: AppColors.secondary,
+              title: "Ajustes del Sistema",
+              subtitle:
+                  "Control central de automatización, tasa y visualización",
+              onTap: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => const AjustesSistemaScreen(),
+                  ),
+                );
+              },
+            ),
+            Padding(
               padding: EdgeInsets.symmetric(vertical: 30),
               child: SizedBox(
                 width: double.infinity,
@@ -1509,6 +2731,31 @@ class _PanelPrincipalState extends State<PanelPrincipal>
                         color: Color(0x999E9E9E),
                         fontSize: 12,
                         fontStyle: FontStyle.italic,
+                      ),
+                    ),
+                    SizedBox(height: 8),
+                    Container(
+                      padding: EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 4,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withValues(alpha: 0.1),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(
+                          color: Colors.white.withValues(alpha: 0.2),
+                          width: 1,
+                        ),
+                      ),
+                      child: Text(
+                        'Versión 1.0.0A',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: Color(0x999E9E9E),
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                          letterSpacing: 0.5,
+                        ),
                       ),
                     ),
                   ],
@@ -1569,25 +2816,6 @@ class _PanelPrincipalState extends State<PanelPrincipal>
             ),
             const Divider(height: 40),
 
-            // --- SECCIÓN CLIENTES ---
-            _buildAdminActionTile(
-              icon: Icons.person_add_alt_1_rounded,
-              color: Colors.blue,
-              title: "Registrar Nuevo Cliente",
-              subtitle: "Añadir a la base de datos de estadísticas",
-              onTap: () => _mostrarFormularioCliente(context),
-            ),
-
-            // --- SECCIÓN TRABAJADORES ---
-            const SizedBox(height: 15),
-            _buildAdminActionTile(
-              icon: Icons.badge_rounded,
-              color: Colors.orange,
-              title: "Pre-autorizar Trabajador",
-              subtitle: "Permitir registro de nuevos empleados",
-              onTap: () => _mostrarFormularioTrabajador(context),
-            ),
-
             const SizedBox(height: 15),
             // --- SECCIÓN ESTADÍSTICAS ---
             _buildAdminActionTile(
@@ -1608,6 +2836,27 @@ class _PanelPrincipalState extends State<PanelPrincipal>
 
             if (rolActual == "admin") ...[
               const SizedBox(height: 15),
+              // --- SECCIÓN GESTIÓN USUARIOS ---
+              _buildAdminActionTile(
+                icon: Icons.people_alt_rounded,
+                color: Colors.blueAccent,
+                title: "Panel de Personal",
+                subtitle: "Ver, buscar, bloquear o pre-autorizar personal",
+                onTap: () {
+                  Navigator.pop(context); // Cierra el modal de admin
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (context) => _GestionPersonalScreen(
+                        dbService: _dbService,
+                        onPreAutorizar: () =>
+                            _mostrarFormularioTrabajador(context),
+                      ),
+                    ),
+                  );
+                },
+              ),
+              const SizedBox(height: 15),
               // --- SECCIÓN BITÁCORA ---
               _buildAdminActionTile(
                 icon: Icons.history_edu_rounded,
@@ -1624,33 +2873,145 @@ class _PanelPrincipalState extends State<PanelPrincipal>
                   );
                 },
               ),
+              const SizedBox(height: 15),
+              // --- SECCIÓN MONITOR ERRORES ---
+              _buildAdminActionTile(
+                icon: Icons.bug_report_rounded,
+                color: Colors.red,
+                title: "Monitor de Errores",
+                subtitle: "Ver fallos técnicos reportados",
+                onTap: () {
+                  Navigator.pop(context);
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (context) => const MonitorErroresScreen(),
+                    ),
+                  );
+                },
+              ),
             ],
-            const SizedBox(height: 15),
-            // --- SECCIÓN PRUEBA FCM (Temporal) ---
-            _buildAdminActionTile(
-              icon: Icons.notification_add_rounded,
-              color: Colors.redAccent,
-              title: "Probar Notificación Global",
-              subtitle: "Verificar conexión FCM V1",
-              onTap: () async {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text("Enviando prueba V1...")),
-                );
-                await _dbService.enviarNotificacionGlobal(
-                  "¡Conexión Exitosa!",
-                  "El sistema de notificaciones V1 está activo",
-                );
-              },
-            ),
+            if (rolActual == "admin") ...[
+              const SizedBox(height: 15),
+              // --- SECCIÓN PRUEBA FCM (Temporal) ---
+              _buildAdminActionTile(
+                icon: Icons.notification_add_rounded,
+                color: Colors.redAccent,
+                title: "Probar Notificación Global",
+                subtitle: "Verificar conexión FCM V1",
+                onTap: () async {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text("Enviando prueba vía GAS...")),
+                  );
+                  await _notifService.enviarNotificacionGAS(
+                    topic: "stock_alerts",
+                    titulo: "¡Conexión Exitosa!",
+                    cuerpo:
+                        "El puente de notificaciones GAS ahora está activo.",
+                    prioridad: NotifPriority.alta,
+                  );
+                },
+              ),
+              const SizedBox(height: 15),
+              // --- SECCIÓN ELIMINAR BASE DE DATOS ---
+              _buildAdminActionTile(
+                icon: Icons.delete_forever_rounded,
+                color: Colors.red,
+                title: "Eliminar Base de Datos",
+                subtitle: "Borrado crítico de registros (Solo Admin)",
+                onTap: () async {
+                  final confirmar = await _mostrarDialogoConfirmacion(
+                    context,
+                    "¡ACCIÓN CRÍTICA!",
+                    "¿Está ABSOLUTAMENTE seguro de eliminar los registros locales? Esta acción es irreversible y solo permitida para el Administrador principal.",
+                    Colors.red,
+                  );
+                  if (confirmar == true) {
+                    // Aquí iría la lógica de borrado si existiera en el service
+                    _mostrarMensaje(
+                      "Función restringida por seguridad superior",
+                      esError: true,
+                    );
+                  }
+                },
+              ),
+            ],
 
             const SizedBox(height: 40),
             const Text(
-              "⚠️ Nota de Seguridad",
+              "Nota de Seguridad",
               style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey),
             ),
             const Text(
               "Las acciones realizadas aquí son registradas automáticamente en la bitácora del sistema para auditoría.",
               style: TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _mostrarDialogoGestionTasa(BuildContext context) {
+    final TextEditingController manualController = TextEditingController(
+      text: _valorManualTasa.toString(),
+    );
+    bool autoLocal = _usarTasaAutomatica;
+
+    showDialog(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setStateDialog) => AlertDialog(
+          title: const Text("Gestión de Tasa de Cambio"),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SwitchListTile(
+                title: const Text("Usar Tasa BCV Automática"),
+                subtitle: const Text("Se actualiza vía API de terceros"),
+                value: autoLocal,
+                onChanged: (val) {
+                  setStateDialog(() => autoLocal = val);
+                },
+              ),
+              const SizedBox(height: 10),
+              if (!autoLocal)
+                TextField(
+                  controller: manualController,
+                  keyboardType: const TextInputType.numberWithOptions(
+                    decimal: true,
+                  ),
+                  decoration: InputDecoration(
+                    labelText: "Valor Manual (Bs/\$)",
+                    prefixIcon: const Icon(Icons.edit_note_rounded),
+                  ),
+                ),
+              if (autoLocal)
+                Padding(
+                  padding: const EdgeInsets.all(8.0),
+                  child: Text(
+                    "Tasa actual BCV: $_tasaVigente Bs/\$",
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text("Cancelar"),
+            ),
+            ElevatedButton(
+              onPressed: () async {
+                double? manualVal = double.tryParse(manualController.text);
+                await _dbService.actualizarConfiguracionTasa(
+                  usarAuto: autoLocal,
+                  valorManual: manualVal,
+                );
+                if (context.mounted) Navigator.pop(context);
+                _notificarExito("Configuración de tasa actualizada");
+              },
+              child: const Text("Guardar"),
             ),
           ],
         ),
@@ -1810,7 +3171,7 @@ class _PanelPrincipalState extends State<PanelPrincipal>
                     const SizedBox(height: 30),
                     DropdownButtonFormField<String>(
                       initialValue: rolSel,
-                      items: ["Empleado", "admin"]
+                      items: ["Empleado", "supervisor", "admin"]
                           .map(
                             (e) => DropdownMenuItem(value: e, child: Text(e)),
                           )
@@ -1990,7 +3351,7 @@ class _PanelPrincipalState extends State<PanelPrincipal>
               : null,
           title: Text(pedido == null ? "Nuevo Pedido" : "Editar Pedido"),
           content: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 700),
+            constraints: const BoxConstraints(maxWidth: 1000),
             child: Form(
               key: _formKeyPedido,
               child: SingleChildScrollView(
@@ -2029,6 +3390,80 @@ class _PanelPrincipalState extends State<PanelPrincipal>
                         ),
                       ),
                       const SizedBox(height: 30),
+                    ],
+                    // --- PRECIO DEL DÓLAR (BCV/MANUAL) ---
+                    if (_mostrarTasaEnPedidos) ...[
+                      InkWell(
+                        onTap: () => _mostrarDialogoGestionTasa(context),
+                        borderRadius: BorderRadius.circular(15),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 12,
+                          ),
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              colors: [
+                                Colors.orange.withValues(alpha: 0.15),
+                                Colors.amber.withValues(alpha: 0.05),
+                              ],
+                            ),
+                            borderRadius: BorderRadius.circular(15),
+                            border: Border.all(
+                              color: Colors.orange.withValues(alpha: 0.3),
+                            ),
+                          ),
+                          child: Row(
+                            children: [
+                              Container(
+                                padding: const EdgeInsets.all(8),
+                                decoration: BoxDecoration(
+                                  color: Colors.orange.withValues(alpha: 0.2),
+                                  shape: BoxShape.circle,
+                                ),
+                                child: const Icon(
+                                  Icons.monetization_on_rounded,
+                                  color: Colors.orange,
+                                  size: 20,
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      _usarTasaAutomatica
+                                          ? "Tasa Oficial BCV"
+                                          : "Tasa Manual",
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.bold,
+                                        color: _usarTasaAutomatica
+                                            ? Colors.orange
+                                            : Colors.blueGrey,
+                                      ),
+                                    ),
+                                    Text(
+                                      "1 USD = ${_tasaVigente.toStringAsFixed(2)} Bs.",
+                                      style: const TextStyle(
+                                        fontSize: 16,
+                                        fontWeight: FontWeight.w900,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              const Icon(
+                                Icons.edit_note_rounded,
+                                color: Colors.orange,
+                                size: 22,
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 20),
                     ],
                     // --- SELECCIÓN DE CLIENTE ---
                     Container(
@@ -2278,6 +3713,42 @@ class _PanelPrincipalState extends State<PanelPrincipal>
                         return null;
                       },
                     ),
+                    if (_tasaVigente > 1.0) ...[
+                      const SizedBox(height: 10),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          "Tasa del día: $_tasaVigente Bs/\$",
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Colors.blueGrey.withValues(alpha: 0.7),
+                            fontStyle: FontStyle.italic,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 15),
+                      TextFormField(
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
+                        ),
+                        decoration: const InputDecoration(
+                          labelText: "Calcular desde USD (\$)",
+                          prefixText: "\$ ",
+                          hintText: "0.00",
+                          helperText:
+                              "Se multiplicará por la tasa para obtener el total en Bs.",
+                        ),
+                        onChanged: (val) {
+                          double? usd = double.tryParse(
+                            val.replaceAll(',', '.'),
+                          );
+                          if (usd != null) {
+                            montoController.text = (usd * _tasaVigente)
+                                .toStringAsFixed(2);
+                          }
+                        },
+                      ),
+                    ],
                   ],
                 ),
               ),
@@ -2324,6 +3795,7 @@ class _PanelPrincipalState extends State<PanelPrincipal>
                       detalleSaco: subTipoSaco,
                       detalleBolsa: subTipoBolsa,
                       idCliente: idClienteSeleccionado,
+                      tasaAplicada: _tasaVigente,
                     );
                   } else {
                     await _dbService.actualizarPedido(
@@ -2337,6 +3809,7 @@ class _PanelPrincipalState extends State<PanelPrincipal>
                       detalleSaco: subTipoSaco,
                       detalleBolsa: subTipoBolsa,
                       idCliente: idClienteSeleccionado,
+                      tasaAplicada: _tasaVigente,
                       cantPrevia: {
                         "NZAtCFwTfLTwb3xiiOUk": pedido.cantSaco,
                         "DWDbVnRf5nqGu8uTu3KA": pedido.cantBolsa,
@@ -2362,30 +3835,42 @@ class _PanelPrincipalState extends State<PanelPrincipal>
 
   Widget _buildFilterChip(String valor, {String? label}) {
     final bool seleccionado = _filtroEstado == valor;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 5),
+      padding: const EdgeInsets.symmetric(horizontal: 4),
       child: ChoiceChip(
         label: Text(label ?? valor),
         selected: seleccionado,
         onSelected: (bool selected) {
-          if (selected) setState(() => _filtroEstado = valor);
+          setState(() {
+            if (selected) {
+              _filtroEstado = valor;
+            } else {
+              _filtroEstado = "Todos";
+            }
+            _paginaActual = 1;
+          });
         },
-        selectedColor: AppColors.secondary,
-        backgroundColor: Colors.white,
+        selectedColor: Colors.cyan.withValues(alpha: 0.15),
+        backgroundColor: Colors.transparent,
         labelStyle: TextStyle(
-          color: seleccionado ? Colors.white : Colors.blueGrey,
+          color: seleccionado
+              ? (isDark ? Colors.cyanAccent : Colors.cyan.shade800)
+              : (isDark ? Colors.white70 : Colors.blueGrey),
           fontWeight: seleccionado ? FontWeight.bold : FontWeight.normal,
+          fontSize: 12,
         ),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(15),
+        checkmarkColor: isDark ? Colors.cyanAccent : Colors.cyan.shade800,
+        showCheckmark: true,
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        shape: StadiumBorder(
           side: BorderSide(
             color: seleccionado
-                ? Colors.cyan
-                : Colors.blueGrey.withValues(alpha: 0.2),
+                ? Colors.cyan.withValues(alpha: 0.5)
+                : (isDark ? Colors.white12 : Colors.black12),
           ),
         ),
-        showCheckmark: false,
-        elevation: seleccionado ? 4 : 0,
       ),
     );
   }
@@ -2443,143 +3928,141 @@ class _PanelPrincipalState extends State<PanelPrincipal>
     int bF,
     int bC,
   ) {
-    final bool isDark = Theme.of(context).brightness == Brightness.dark;
+    // Si el panel lateral está habilitado y hay espacio (Desktop), lo seleccionamos
+    if (_mostrarPanelLateral && MediaQuery.of(context).size.width > 1100) {
+      setState(() {
+        _pedidoSeleccionado = pedido;
+      });
+      return;
+    }
 
+    // De lo contrario, usamos el modal tradicional
     showModalBottomSheet(
       context: context,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
       builder: (context) {
         return Container(
-          padding: const EdgeInsets.all(20),
-          child: SingleChildScrollView(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Center(
-                  child: Container(
-                    width: 50,
-                    height: 5,
-                    decoration: BoxDecoration(
-                      color: isDark ? Colors.grey[700] : Colors.grey[300],
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                  ),
+          decoration: BoxDecoration(
+            color: Theme.of(context).scaffoldBackgroundColor,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(25)),
+          ),
+          padding: const EdgeInsets.fromLTRB(20, 10, 20, 30),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.grey[400],
+                  borderRadius: BorderRadius.circular(10),
                 ),
-                const SizedBox(height: 20),
-                Text(
-                  "Información Completa",
-                  style: TextStyle(
-                    fontSize: 20,
-                    fontWeight: FontWeight.bold,
-                    color: isDark ? Colors.white : Colors.blue[900],
-                  ),
-                ),
-                const Divider(),
-                _filaDetalle(
-                  context,
-                  Icons.confirmation_number,
-                  "N° Ticket",
-                  pedido.ticket,
-                ),
-                _filaDetalle(
-                  context,
-                  Icons.ac_unit,
-                  "Tipo de Hielo",
-                  pedido.tipoHielo,
-                ),
-                _filaDetalle(
-                  context,
-                  Icons.attach_money,
-                  "Monto Total",
-                  "${pedido.monto} Bs",
-                ),
-                _filaDetalle(
-                  context,
-                  Icons.info,
-                  "Estado Actual",
-                  pedido.estado,
-                ),
-                _filaDetalle(
-                  context,
-                  Icons.person_add,
-                  "Creado por",
-                  pedido.creadoPor ?? "N/A",
-                ),
-                _filaDetalle(
-                  context,
-                  Icons.local_shipping,
-                  "Despachado por",
-                  pedido.despachadoPor ?? "Pendiente",
-                ),
-                _filaDetalle(
-                  context,
-                  Icons.calendar_today,
-                  "Fecha y Hora",
-                  pedido.fecha?.toString() ?? "N/A",
-                ),
-                const SizedBox(height: 20),
-                // Botón de edición solo para el Admin
-                if (rolActual == "admin")
-                  SizedBox(
-                    width: double.infinity,
-                    child: ElevatedButton.icon(
-                      icon: const Icon(Icons.edit),
-                      label: const Text("Editar Pedido"),
-                      onPressed: () {
-                        Navigator.pop(context);
-                        // Cierra el modal de detalles
-                        _mostrarDialogoNuevoPedido(
-                          context,
-                          nombreCompleto,
-                          sF,
-                          sC,
-                          bF,
-                          bC,
-                          pedido,
-                        );
-                      },
-                    ),
-                  ),
-              ],
-            ),
+              ),
+              const SizedBox(height: 20),
+              comp.PedidoCard(
+                pedido: pedido,
+                isDetailed: true,
+                onTap: () {},
+                trailingActions:
+                    (rolActual == "admin" || rolActual == "supervisor")
+                    ? Padding(
+                        padding: const EdgeInsets.only(top: 10),
+                        child: SizedBox(
+                          width: double.infinity,
+                          child: ElevatedButton.icon(
+                            icon: const Icon(Icons.edit_rounded),
+                            label: const Text("Editar Pedido"),
+                            onPressed: () {
+                              Navigator.pop(context);
+                              _mostrarDialogoNuevoPedido(
+                                context,
+                                nombreCompleto,
+                                sF,
+                                sC,
+                                bF,
+                                bC,
+                                pedido,
+                              );
+                            },
+                          ),
+                        ),
+                      )
+                    : null,
+              ),
+            ],
           ),
         );
       },
     );
   }
 
-  // Widget auxiliar para las filas del modal
-  Widget _filaDetalle(
+  Widget _buildSidePanel(
     BuildContext context,
-    IconData icono,
-    String titulo,
-    String valor,
+    Pedido pedido,
+    String rolActual,
+    String nombreCompleto,
+    int sF,
+    int sC,
+    int bF,
+    int bC,
   ) {
-    final bool isDark = Theme.of(context).brightness == Brightness.dark;
-
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 8),
-      child: Row(
-        children: [
-          Icon(
-            icono,
-            color: isDark ? Colors.blueGrey[200] : Colors.blueGrey,
-            size: 20,
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    return Container(
+      width: 450,
+      decoration: BoxDecoration(
+        color: Theme.of(context).cardColor,
+        border: Border(
+          left: BorderSide(
+            color: isDark ? Colors.white10 : Colors.black12,
+            width: 1,
           ),
-          const SizedBox(width: 10),
-          Text(
-            "$titulo: ",
-            style: TextStyle(
-              fontWeight: FontWeight.bold,
-              color: isDark ? Colors.white : Colors.black87,
+        ),
+      ),
+      child: Column(
+        children: [
+          AppBar(
+            title: const Text("Detalles del Pedido"),
+            backgroundColor: Colors.transparent,
+            foregroundColor: isDark ? Colors.white : AppColors.primary,
+            elevation: 0,
+            leading: IconButton(
+              icon: const Icon(Icons.close_rounded),
+              onPressed: () => setState(() => _pedidoSeleccionado = null),
             ),
           ),
           Expanded(
-            child: Text(
-              valor,
-              style: TextStyle(color: isDark ? Colors.white70 : Colors.black87),
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(20),
+              child: comp.PedidoCard(
+                pedido: pedido,
+                isDetailed: true,
+                onTap: () {},
+                trailingActions:
+                    (rolActual == "admin" || rolActual == "supervisor")
+                    ? Padding(
+                        padding: const EdgeInsets.only(top: 10),
+                        child: SizedBox(
+                          width: double.infinity,
+                          child: ElevatedButton.icon(
+                            icon: const Icon(Icons.edit_rounded),
+                            label: const Text("Editar Pedido"),
+                            onPressed: () {
+                              _mostrarDialogoNuevoPedido(
+                                context,
+                                nombreCompleto,
+                                sF,
+                                sC,
+                                bF,
+                                bC,
+                                pedido,
+                              );
+                            },
+                          ),
+                        ),
+                      )
+                    : null,
+              ),
             ),
           ),
         ],
@@ -2654,13 +4137,56 @@ class _EstadisticasScreen extends StatefulWidget {
 
 class _EstadisticasScreenState extends State<_EstadisticasScreen> {
   String _filtroEstadisticas = "Semana";
+  DateTime? _customStartDate;
+  DateTime? _customEndDate;
+
+  Future<void> _seleccionarFecha(BuildContext context) async {
+    final DateTimeRange? picked = await showDateRangePicker(
+      context: context,
+      firstDate: DateTime(2020),
+      lastDate: DateTime.now(),
+      initialDateRange: _customStartDate != null && _customEndDate != null
+          ? DateTimeRange(start: _customStartDate!, end: _customEndDate!)
+          : null,
+      builder: (context, child) {
+        return Theme(
+          data: Theme.of(context).copyWith(
+            colorScheme: ColorScheme.fromSeed(
+              seedColor: AppColors.primary,
+              primary: AppColors.primary,
+              onPrimary: Colors.white,
+              surface: Theme.of(context).scaffoldBackgroundColor,
+            ),
+          ),
+          child: child!,
+        );
+      },
+    );
+
+    if (picked != null) {
+      setState(() {
+        _customStartDate = picked.start;
+        _customEndDate = picked.end;
+        _filtroEstadisticas = "Personalizado";
+      });
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text("Dashboard de Ventas")),
+      appBar: AppBar(
+        title: const Text(
+          "Dashboard de Ventas",
+          style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+        ),
+      ),
       body: StreamBuilder<List<Pedido>>(
-        stream: widget.dbService.streamVentasFiltradas(_filtroEstadisticas),
+        stream: widget.dbService.streamVentasFiltradas(
+          _filtroEstadisticas,
+          fechaInicio: _customStartDate,
+          fechaFin: _customEndDate,
+        ),
         builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) {
             return const Center(child: CircularProgressIndicator());
@@ -2702,24 +4228,75 @@ class _EstadisticasScreenState extends State<_EstadisticasScreen> {
           return ListView(
             padding: const EdgeInsets.all(20),
             children: [
-              SegmentedButton<String>(
-                segments: const [
-                  ButtonSegment(value: 'Día', label: Text('Hoy')),
-                  ButtonSegment(value: 'Semana', label: Text('Sem')),
-                  ButtonSegment(value: 'Mes', label: Text('Mes')),
-                  ButtonSegment(value: 'Año', label: Text('Año')),
+              Row(
+                children: [
+                  Expanded(
+                    child: SegmentedButton<String>(
+                      showSelectedIcon: false,
+                      segments: const [
+                        ButtonSegment(
+                          value: 'Día',
+                          label: Text('Hoy', style: TextStyle(fontSize: 12)),
+                        ),
+                        ButtonSegment(
+                          value: 'Semana',
+                          label: Text('Sem', style: TextStyle(fontSize: 12)),
+                        ),
+                        ButtonSegment(
+                          value: 'Mes',
+                          label: Text('Mes', style: TextStyle(fontSize: 12)),
+                        ),
+                        ButtonSegment(
+                          value: 'Año',
+                          label: Text('Año', style: TextStyle(fontSize: 12)),
+                        ),
+                        ButtonSegment(
+                          value: 'Personalizado',
+                          label: Icon(Icons.calendar_month_rounded, size: 18),
+                        ),
+                      ],
+                      selected: {_filtroEstadisticas},
+                      onSelectionChanged: (Set<String> newSelection) {
+                        if (newSelection.first == 'Personalizado') {
+                          _seleccionarFecha(context);
+                        } else {
+                          setState(() {
+                            _filtroEstadisticas = newSelection.first;
+                            _customStartDate = null;
+                            _customEndDate = null;
+                          });
+                        }
+                      },
+                      style: SegmentedButton.styleFrom(
+                        selectedBackgroundColor: AppColors.secondary,
+                        selectedForegroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(horizontal: 4),
+                        visualDensity: VisualDensity.compact,
+                      ),
+                    ),
+                  ),
                 ],
-                selected: {_filtroEstadisticas},
-                onSelectionChanged: (Set<String> newSelection) {
-                  setState(() {
-                    _filtroEstadisticas = newSelection.first;
-                  });
-                },
-                style: SegmentedButton.styleFrom(
-                  selectedBackgroundColor: AppColors.secondary,
-                  selectedForegroundColor: Colors.white,
-                ),
               ),
+              if (_filtroEstadisticas == 'Personalizado' &&
+                  _customStartDate != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 10),
+                  child: Center(
+                    child: Chip(
+                      label: Text(
+                        "${_customStartDate!.day}/${_customStartDate!.month} - ${_customEndDate!.day}/${_customEndDate!.month}",
+                        style: const TextStyle(fontSize: 12),
+                      ),
+                      onDeleted: () {
+                        setState(() {
+                          _filtroEstadisticas = "Semana";
+                          _customStartDate = null;
+                          _customEndDate = null;
+                        });
+                      },
+                    ),
+                  ),
+                ),
               const SizedBox(height: 30),
               _buildGananciasCard(totalMonto, _filtroEstadisticas),
               const SizedBox(height: 30),
@@ -2733,8 +4310,8 @@ class _EstadisticasScreenState extends State<_EstadisticasScreen> {
               ),
               const SizedBox(height: 20),
               Container(
-                height: 300,
-                padding: const EdgeInsets.all(15),
+                height: 350,
+                padding: const EdgeInsets.only(top: 25, bottom: 10),
                 decoration: BoxDecoration(
                   color: Theme.of(context).cardColor,
                   borderRadius: BorderRadius.circular(20),
@@ -2745,31 +4322,59 @@ class _EstadisticasScreenState extends State<_EstadisticasScreen> {
                     ),
                   ],
                 ),
-                child: BarChart(
-                  BarChartData(
-                    alignment: BarChartAlignment.spaceAround,
-                    maxY: (maxVolumen + 2).toDouble(),
-                    barGroups: barGroups,
-                    gridData: const FlGridData(show: false),
-                    borderData: FlBorderData(show: false),
-                    titlesData: FlTitlesData(
-                      leftTitles: const AxisTitles(
-                        sideTitles: SideTitles(showTitles: false),
-                      ),
-                      topTitles: const AxisTitles(
-                        sideTitles: SideTitles(showTitles: false),
-                      ),
-                      rightTitles: const AxisTitles(
-                        sideTitles: SideTitles(showTitles: false),
-                      ),
-                      bottomTitles: AxisTitles(
-                        sideTitles: SideTitles(
-                          showTitles: true,
-                          getTitlesWidget: (val, meta) => Text(
-                            val.toInt() < labels.length
-                                ? labels[val.toInt()]
-                                : '',
-                            style: const TextStyle(fontSize: 10),
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  physics: const BouncingScrollPhysics(),
+                  child: SizedBox(
+                    width: (labels.length * 50.0).clamp(
+                      MediaQuery.of(context).size.width - 40,
+                      5000,
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.only(right: 20),
+                      child: BarChart(
+                        BarChartData(
+                          alignment: BarChartAlignment.spaceAround,
+                          maxY: (maxVolumen + 2).toDouble(),
+                          barGroups: barGroups,
+                          gridData: const FlGridData(show: false),
+                          borderData: FlBorderData(show: false),
+                          titlesData: FlTitlesData(
+                            leftTitles: const AxisTitles(
+                              sideTitles: SideTitles(showTitles: false),
+                            ),
+                            topTitles: const AxisTitles(
+                              sideTitles: SideTitles(showTitles: false),
+                            ),
+                            rightTitles: const AxisTitles(
+                              sideTitles: SideTitles(showTitles: false),
+                            ),
+                            bottomTitles: AxisTitles(
+                              sideTitles: SideTitles(
+                                showTitles: true,
+                                reservedSize: 40,
+                                getTitlesWidget: (val, meta) {
+                                  final int index = val.toInt();
+                                  if (index < labels.length) {
+                                    return SideTitleWidget(
+                                      meta: meta,
+                                      space: 10,
+                                      child: Text(
+                                        labels[index],
+                                        style: TextStyle(
+                                          fontSize: 10,
+                                          fontWeight: FontWeight.bold,
+                                          color: AppColors.primary.withValues(
+                                            alpha: 0.7,
+                                          ),
+                                        ),
+                                      ),
+                                    );
+                                  }
+                                  return const SizedBox.shrink();
+                                },
+                              ),
+                            ),
                           ),
                         ),
                       ),
@@ -2838,7 +4443,7 @@ class _EstadisticasScreenState extends State<_EstadisticasScreen> {
       return "${fecha.hour}h";
     } else if (filtro == 'Semana') {
       return _getDiaNombreTab(0, customDate: fecha);
-    } else if (filtro == 'Mes') {
+    } else if (filtro == 'Mes' || filtro == 'Personalizado') {
       return "Dia ${fecha.day}";
     } else {
       switch (fecha.month) {
@@ -2877,7 +4482,7 @@ class _EstadisticasScreenState extends State<_EstadisticasScreen> {
       return List.generate(24, (i) => "${i}h");
     } else if (filtro == 'Semana') {
       return ["Lun", "Mar", "Mie", "Jue", "Vie", "Sab", "Dom"];
-    } else if (filtro == 'Mes') {
+    } else if (filtro == 'Mes' || filtro == 'Personalizado') {
       return List.generate(31, (i) => "Dia ${i + 1}");
     } else {
       return [
@@ -2935,7 +4540,24 @@ class _BitacoraScreenState extends State<BitacoraScreen> {
   String? _filtroAccion;
 
   final TextEditingController _searchController = TextEditingController();
-  String _tipoFiltro = 'Ninguno'; // Ninguno, Nombre, Correo, Acción
+  String _tipoFiltro = 'Ninguno'; // Ninguno, Nombre, Correo, Acción, Fecha
+  DateTime? _fechaInicioBitacora;
+  DateTime? _fechaFinBitacora;
+
+  Future<void> _seleccionarRangoFecha(BuildContext context) async {
+    final DateTimeRange? picked = await showDateRangePicker(
+      context: context,
+      firstDate: DateTime(2023),
+      lastDate: DateTime.now().add(const Duration(days: 1)),
+    );
+    if (picked != null) {
+      setState(() {
+        _fechaInicioBitacora = picked.start;
+        _fechaFinBitacora = picked.end;
+        _tipoFiltro = 'Fecha';
+      });
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -2970,19 +4592,29 @@ class _BitacoraScreenState extends State<BitacoraScreen> {
                       child: DropdownButton<String>(
                         isExpanded: true,
                         value: _tipoFiltro,
-                        items: ['Ninguno', 'Nombre', 'Correo', 'Acción']
-                            .map(
-                              (t) => DropdownMenuItem(value: t, child: Text(t)),
-                            )
-                            .toList(),
+                        items:
+                            ['Ninguno', 'Nombre', 'Correo', 'Acción', 'Fecha']
+                                .map(
+                                  (t) => DropdownMenuItem(
+                                    value: t,
+                                    child: Text(t),
+                                  ),
+                                )
+                                .toList(),
                         onChanged: (val) {
-                          setState(() {
-                            _tipoFiltro = val!;
-                            _filtroNombre = null;
-                            _filtroCorreo = null;
-                            _filtroAccion = null;
-                            _searchController.clear();
-                          });
+                          if (val == 'Fecha') {
+                            _seleccionarRangoFecha(context);
+                          } else {
+                            setState(() {
+                              _tipoFiltro = val!;
+                              _filtroNombre = null;
+                              _filtroCorreo = null;
+                              _filtroAccion = null;
+                              _fechaInicioBitacora = null;
+                              _fechaFinBitacora = null;
+                              _searchController.clear();
+                            });
+                          }
                         },
                       ),
                     ),
@@ -3025,6 +4657,25 @@ class _BitacoraScreenState extends State<BitacoraScreen> {
                     },
                   ),
                 ],
+                if (_tipoFiltro == 'Fecha' && _fechaInicioBitacora != null) ...[
+                  const SizedBox(height: 8),
+                  GestureDetector(
+                    onTap: () => _seleccionarRangoFecha(context),
+                    child: Chip(
+                      avatar: const Icon(Icons.date_range, size: 16),
+                      label: Text(
+                        "Desde: ${_fechaInicioBitacora!.day}/${_fechaInicioBitacora!.month} - Hasta: ${_fechaFinBitacora!.day}/${_fechaFinBitacora!.month}",
+                      ),
+                      onDeleted: () {
+                        setState(() {
+                          _tipoFiltro = 'Ninguno';
+                          _fechaInicioBitacora = null;
+                          _fechaFinBitacora = null;
+                        });
+                      },
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
@@ -3036,6 +4687,8 @@ class _BitacoraScreenState extends State<BitacoraScreen> {
                 filtroNombre: _filtroNombre,
                 filtroCorreo: _filtroCorreo,
                 filtroAccion: _filtroAccion,
+                fechaInicio: _fechaInicioBitacora,
+                fechaFin: _fechaFinBitacora,
               ),
               builder: (context, snapshot) {
                 if (snapshot.hasError) {
@@ -3241,6 +4894,7 @@ class _EscritorioView extends StatelessWidget {
               bolsaFisico,
               bolsaComp,
             ),
+          // Contenido Principal: Ocupa todo el ancho restante
           Expanded(
             child: parent._buildMainContent(
               nombreCompleto: nombreCompleto,
@@ -3253,6 +4907,17 @@ class _EscritorioView extends StatelessWidget {
               showHeader: true,
             ),
           ),
+          if (parent._mostrarPanelLateral && parent._pedidoSeleccionado != null)
+            parent._buildSidePanel(
+              context,
+              parent._pedidoSeleccionado!,
+              rolActual,
+              nombreCompleto,
+              sacoFisico,
+              sacoComp,
+              bolsaFisico,
+              bolsaComp,
+            ),
         ],
       ),
     );
@@ -3287,27 +4952,37 @@ class _MovilView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      extendBody: true,
       appBar: AppBar(
-        title: Image.asset('assets/frifalca6.png', height: 35),
-        centerTitle: true,
+        automaticallyImplyLeading: false,
         backgroundColor: AppColors.primary,
-        iconTheme: const IconThemeData(color: Colors.white),
+        elevation: 0,
+        title: Text(
+          'Frifalca',
+          style: GoogleFonts.montserrat(
+            color: AppColors.secondary,
+            fontWeight: FontWeight.bold,
+            fontSize: 22,
+          ),
+        ),
         actions: [
+          parent._buildNotificationBellButton(),
           IconButton(
             icon: Icon(
               Theme.of(context).brightness == Brightness.dark
-                  ? Icons.light_mode
-                  : Icons.dark_mode,
+                  ? Icons.light_mode_rounded
+                  : Icons.dark_mode_rounded,
+              color: Colors.white,
             ),
             onPressed: onToggleTheme,
           ),
           IconButton(
-            icon: const Icon(Icons.logout, color: Colors.white),
+            icon: const Icon(Icons.logout_rounded, color: Colors.white),
             onPressed: () => parent._mostrarConfirmacionLogout(context),
           ),
+          const SizedBox(width: 8),
         ],
       ),
-      drawer: null,
       body: parent._buildMainContent(
         nombreCompleto: nombreCompleto,
         rolActual: rolActual,
@@ -3352,8 +5027,10 @@ class _DynamicInventoryHeaderDelegate extends SliverPersistentHeaderDelegate {
   final int sacoFisico, sacoComp, bolsaFisico, bolsaComp;
   final bool esInvitado;
   final String nombreCompleto;
+  final String rolActual;
   final Function(BuildContext context, String id, int cantidad, String motivo)
   onAjustar;
+  final double maxExtentValue;
 
   _DynamicInventoryHeaderDelegate({
     required this.sacoFisico,
@@ -3362,31 +5039,23 @@ class _DynamicInventoryHeaderDelegate extends SliverPersistentHeaderDelegate {
     required this.bolsaComp,
     required this.esInvitado,
     required this.nombreCompleto,
+    required this.rolActual,
     required this.onAjustar,
+    // ignore: unused_element_parameter
+    this.maxExtentValue =
+        185.0, // Base reducida para que se ajuste a la tarjeta al desaparecer la alerta
   });
 
-  @override
-  double get maxExtent => 320.0; // Reducido aún más para eliminar "aire" innecesario
+  /// Calcula si hay alerta de sin stock activa
+  bool get _haySinStock =>
+      (sacoFisico - sacoComp) <= 0 || (bolsaFisico - bolsaComp) <= 0;
 
-  Widget _buildMiniInfo(String label, int val, Color color) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Text(
-          "$label: ",
-          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
-        ),
-        Text(
-          val.toString(),
-          style: TextStyle(
-            color: color,
-            fontWeight: FontWeight.w900,
-            fontSize: 16,
-          ),
-        ),
-      ],
-    );
-  }
+  /// El maxExtent se estira y se contrae de forma agresiva según el estado
+  @override
+  double get maxExtent => maxExtentValue + (_haySinStock ? 75.0 : 0.0);
+
+  @override
+  double get minExtent => 60.0; // Cambiado a un mínimo mayor para evitar solapes al reducir maxExtent
 
   Widget _buildAlertaBadge(String mensaje) {
     return Container(
@@ -3432,6 +5101,16 @@ class _DynamicInventoryHeaderDelegate extends SliverPersistentHeaderDelegate {
     bool overlapsContent,
   ) {
     final double percent = (shrinkOffset / maxExtent).clamp(0.0, 1.0);
+
+    // Si el scroll ha avanzado lo suficiente, mostramos el componente resumido
+    if (percent > 0.8) {
+      return ResumenInventarioHeader(
+        sacos: sacoFisico - sacoComp,
+        bolsas: bolsaFisico - bolsaComp,
+      );
+    }
+
+    // Si no, mostramos el diseño expandido sin el contenedor gris de fondo
     final bool isDark = Theme.of(context).brightness == Brightness.dark;
 
     return ClipRRect(
@@ -3450,83 +5129,35 @@ class _DynamicInventoryHeaderDelegate extends SliverPersistentHeaderDelegate {
               ),
             ),
           ),
-          child: Stack(
-            children: [
-              // --- ESTADO EXPANDIDO (Con alertas integradas) ---
-              Positioned.fill(
-                child: Opacity(
-                  opacity: (1.0 - percent * 2.5).clamp(0.0, 1.0),
-                  child: SingleChildScrollView(
-                    physics: const NeverScrollableScrollPhysics(),
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 16,
-                      vertical: 4,
-                    ),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        // Cálculo de alerta dentro del delegado
-                        if ((sacoFisico - sacoComp) <= 0 ||
-                            (bolsaFisico - bolsaComp) <= 0) ...[
-                          _buildAlertaBadge("TRABAJANDO SIN STOCK"),
-                          const SizedBox(height: 8),
-                        ],
-                        comp.InventarioResumenCard(
-                          sacoFisico: sacoFisico,
-                          sacoComp: sacoComp,
-                          bolsaFisico: bolsaFisico,
-                          bolsaComp: bolsaComp,
-                          readOnly: esInvitado,
-                          onAjustar: onAjustar,
-                        ),
-                      ],
-                    ),
+          child: Padding(
+            padding: EdgeInsets.zero,
+            child: SingleChildScrollView(
+              physics: const NeverScrollableScrollPhysics(),
+              padding: const EdgeInsets.symmetric(
+                horizontal: 20,
+                vertical: 2,
+              ), // Align 20px
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // Cálculo de alerta dentro del delegado
+                  if (_haySinStock) ...[
+                    _buildAlertaBadge("TRABAJANDO SIN STOCK"),
+                    const SizedBox(height: 8),
+                  ],
+                  comp.InventarioResumenCard(
+                    sacoFisico: sacoFisico,
+                    sacoComp: sacoComp,
+                    bolsaFisico: bolsaFisico,
+                    bolsaComp: bolsaComp,
+                    readOnly:
+                        esInvitado ||
+                        (rolActual != "admin" && rolActual != "supervisor"),
+                    onAjustar: onAjustar,
                   ),
-                ),
+                ],
               ),
-
-              // --- ESTADO COLAPSADO (Dot indicador de alerta) ---
-              Opacity(
-                opacity: (percent * 2.0 - 1.0).clamp(0.0, 1.0),
-                child: Center(
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      // Indicador minimalista de alerta en modo colapsado
-                      if ((sacoFisico - sacoComp) <= 0 ||
-                          (bolsaFisico - bolsaComp) <= 0) ...[
-                        Container(
-                          width: 8,
-                          height: 8,
-                          decoration: const BoxDecoration(
-                            color: Colors.red,
-                            shape: BoxShape.circle,
-                          ),
-                        ),
-                        const SizedBox(width: 10),
-                      ],
-                      _buildMiniInfo(
-                        "S",
-                        sacoFisico - sacoComp,
-                        AppColors.secondary,
-                      ),
-                      const SizedBox(width: 25),
-                      Container(
-                        width: 1,
-                        height: 20,
-                        color: isDark ? Colors.white24 : Colors.black12,
-                      ),
-                      const SizedBox(width: 25),
-                      _buildMiniInfo(
-                        "B",
-                        bolsaFisico - bolsaComp,
-                        AppColors.secondary,
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ],
+            ),
           ),
         ),
       ),
@@ -3534,9 +5165,629 @@ class _DynamicInventoryHeaderDelegate extends SliverPersistentHeaderDelegate {
   }
 
   @override
-  double get minExtent => 60.0;
+  bool shouldRebuild(covariant _DynamicInventoryHeaderDelegate oldDelegate) =>
+      maxExtentValue != oldDelegate.maxExtentValue ||
+      sacoFisico != oldDelegate.sacoFisico ||
+      sacoComp != oldDelegate.sacoComp ||
+      bolsaFisico != oldDelegate.bolsaFisico ||
+      bolsaComp != oldDelegate.bolsaComp ||
+      esInvitado != oldDelegate.esInvitado ||
+      nombreCompleto != oldDelegate.nombreCompleto ||
+      rolActual != oldDelegate.rolActual;
+}
+
+// Nuevo widget independiente para el estado "encogido" o resumido
+class ResumenInventarioHeader extends StatelessWidget {
+  final int sacos;
+  final int bolsas;
+
+  const ResumenInventarioHeader({
+    super.key,
+    required this.sacos,
+    required this.bolsas,
+  });
+
+  Widget _buildMiniInfo(String label, int val, Color color) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          "$label: ",
+          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+        ),
+        Text(
+          val.toString(),
+          style: TextStyle(
+            color: color,
+            fontWeight: FontWeight.w900,
+            fontSize: 16,
+          ),
+        ),
+      ],
+    );
+  }
 
   @override
-  bool shouldRebuild(covariant SliverPersistentHeaderDelegate oldDelegate) =>
-      true;
+  Widget build(BuildContext context) {
+    final bool isDark = Theme.of(context).brightness == Brightness.dark;
+    final bool hayAlerta = sacos <= 0 || bolsas <= 0;
+
+    return ClipRRect(
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+        child: Container(
+          decoration: BoxDecoration(
+            color: isDark
+                ? Colors.white.withValues(alpha: 0.05)
+                : Colors.white.withValues(alpha: 0.9),
+            border: Border(
+              bottom: BorderSide(
+                color: isDark
+                    ? Colors.white.withValues(alpha: 0.1)
+                    : Colors.black.withValues(alpha: 0.05),
+              ),
+            ),
+          ),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              if (hayAlerta) ...[
+                Container(
+                  width: 8,
+                  height: 8,
+                  decoration: const BoxDecoration(
+                    color: Colors.red,
+                    shape: BoxShape.circle,
+                  ),
+                ),
+                const SizedBox(width: 10),
+              ],
+              _buildMiniInfo("Sacos", sacos, AppColors.secondary),
+              const SizedBox(width: 20),
+              Container(
+                width: 1,
+                height: 20,
+                color: isDark ? Colors.white24 : Colors.black12,
+              ),
+              const SizedBox(width: 20),
+              _buildMiniInfo("Bolsas", bolsas, AppColors.secondary),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _GestionPersonalScreen extends StatefulWidget {
+  final DatabaseService dbService;
+  final VoidCallback onPreAutorizar;
+  const _GestionPersonalScreen({
+    required this.dbService,
+    required this.onPreAutorizar,
+  });
+
+  @override
+  State<_GestionPersonalScreen> createState() => _GestionPersonalScreenState();
+}
+
+class _GestionPersonalScreenState extends State<_GestionPersonalScreen> {
+  String _filtro = "";
+
+  void _mostrarDetallesUsuario(Map<String, dynamic> data) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text("${data['nombre'] ?? ''} ${data['apellido'] ?? ''}"),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: data.entries.map((e) {
+              if (e.value == null) return const SizedBox.shrink();
+              String valor = e.value.toString();
+              if (e.value is Timestamp) {
+                valor = (e.value as Timestamp).toDate().toString();
+              }
+              return Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: RichText(
+                  text: TextSpan(
+                    style: TextStyle(
+                      color: Theme.of(context).brightness == Brightness.dark
+                          ? Colors.white
+                          : Colors.black,
+                    ),
+                    children: [
+                      TextSpan(
+                        text: "${e.key}: ",
+                        style: const TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                      TextSpan(text: valor),
+                    ],
+                  ),
+                ),
+              );
+            }).toList(),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text("Cerrar"),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text("Panel de Personal"),
+        backgroundColor: AppColors.primary,
+        foregroundColor: Colors.white,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.person_add_alt_1_rounded),
+            tooltip: "Pre-autorizar Trabajador",
+            onPressed: widget.onPreAutorizar,
+          ),
+          const SizedBox(width: 8),
+        ],
+      ),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(15),
+            child: TextField(
+              decoration: InputDecoration(
+                hintText: "Buscar por nombre...",
+                prefixIcon: const Icon(Icons.search),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(15),
+                ),
+                filled: true,
+                fillColor: Theme.of(context).cardColor,
+              ),
+              onChanged: (v) => setState(() => _filtro = v.toLowerCase()),
+            ),
+          ),
+          Expanded(
+            child: StreamBuilder<List<QueryDocumentSnapshot>>(
+              stream: widget.dbService.streamTrabajadores(),
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+                final allUsers = snapshot.data ?? [];
+                final usuarios = allUsers.where((doc) {
+                  final data = doc.data() as Map<String, dynamic>;
+                  final nombre =
+                      "${data['nombre'] ?? ''} ${data['apellido'] ?? ''}"
+                          .toLowerCase();
+                  return nombre.contains(_filtro);
+                }).toList();
+
+                if (usuarios.isEmpty) {
+                  return const Center(
+                    child: Text("No hay trabajadores registrados"),
+                  );
+                }
+
+                return ListView.separated(
+                  padding: const EdgeInsets.all(15),
+                  itemCount: usuarios.length,
+                  separatorBuilder: (context, index) => const Divider(),
+                  itemBuilder: (context, index) {
+                    final data = usuarios[index].data() as Map<String, dynamic>;
+                    final String uid = usuarios[index].id;
+                    final String nombre =
+                        "${data['nombre'] ?? ''} ${data['apellido'] ?? ''}";
+                    final String correo = data['correo'] ?? 'Sin correo';
+                    final String rol = data['rol'] ?? 'Empleado';
+                    final bool bloqueado = data['bloqueado'] ?? false;
+
+                    return ListTile(
+                      onTap: () => _mostrarDetallesUsuario(data),
+                      leading: CircleAvatar(
+                        backgroundColor: bloqueado
+                            ? Colors.red.withValues(alpha: 0.1)
+                            : Colors.blue.withValues(alpha: 0.1),
+                        child: Icon(
+                          bloqueado
+                              ? Icons.person_off_rounded
+                              : Icons.person_rounded,
+                          color: bloqueado ? Colors.red : Colors.blue,
+                        ),
+                      ),
+                      title: Text(
+                        nombre,
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          decoration: bloqueado
+                              ? TextDecoration.lineThrough
+                              : null,
+                        ),
+                      ),
+                      subtitle: Text("$correo\nRol: $rol"),
+                      isThreeLine: true,
+                      trailing: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          IconButton(
+                            icon: Icon(
+                              bloqueado
+                                  ? Icons.lock_open_rounded
+                                  : Icons.lock_outline_rounded,
+                              color: bloqueado ? Colors.green : Colors.orange,
+                            ),
+                            tooltip: bloqueado ? "Desbloquear" : "Bloquear",
+                            onPressed: () =>
+                                _confirmarCambioEstado(uid, !bloqueado, nombre),
+                          ),
+                          IconButton(
+                            icon: const Icon(
+                              Icons.delete_outline_rounded,
+                              color: Colors.red,
+                            ),
+                            tooltip: "Eliminar",
+                            onPressed: () => _confirmarEliminacion(uid, nombre),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _confirmarCambioEstado(String uid, bool nuevoEstado, String nombre) {
+    showDialog(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(nuevoEstado ? "Bloquear Usuario" : "Desbloquear Usuario"),
+        content: Text(
+          "¿Deseas ${nuevoEstado ? 'bloquear' : 'desbloquear'} a $nombre?",
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text("Cancelar"),
+          ),
+          ElevatedButton(
+            onPressed: () async {
+              Navigator.pop(dialogContext);
+              await widget.dbService.actualizarEstadoTrabajador(
+                uid,
+                nuevoEstado,
+              );
+              if (!mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(
+                    "Usuario ${nuevoEstado ? 'bloqueado' : 'desbloqueado'}",
+                  ),
+                ),
+              );
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: nuevoEstado ? Colors.orange : Colors.green,
+            ),
+            child: Text(nuevoEstado ? "Bloquear" : "Desbloquear"),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _confirmarEliminacion(String uid, String nombre) {
+    showDialog(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text("Eliminar Trabajador"),
+        content: Text("¿Estás seguro de eliminar permanentemente a $nombre?"),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text("Cancelar"),
+          ),
+          ElevatedButton(
+            onPressed: () async {
+              Navigator.pop(dialogContext);
+              await widget.dbService.eliminarTrabajador(uid);
+              if (!mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text("Trabajador eliminado")),
+              );
+            },
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            child: const Text("Eliminar"),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _GestionClientesScreen extends StatefulWidget {
+  final DatabaseService dbService;
+  final VoidCallback onNuevoCliente;
+  const _GestionClientesScreen({
+    required this.dbService,
+    required this.onNuevoCliente,
+  });
+
+  @override
+  State<_GestionClientesScreen> createState() => _GestionClientesScreenState();
+}
+
+class _GestionClientesScreenState extends State<_GestionClientesScreen> {
+  String _filtro = "";
+
+  void _mostrarDetallesCliente(Map<String, dynamic> data) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text("${data['Nombre'] ?? ''} ${data['Apellido'] ?? ''}"),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: data.entries.map((e) {
+              if (e.value == null) return const SizedBox.shrink();
+              String valor = e.value.toString();
+              if (e.value is Timestamp) {
+                valor = (e.value as Timestamp).toDate().toString();
+              }
+              return Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: RichText(
+                  text: TextSpan(
+                    style: TextStyle(
+                      color: Theme.of(context).brightness == Brightness.dark
+                          ? Colors.white
+                          : Colors.black,
+                    ),
+                    children: [
+                      TextSpan(
+                        text: "${e.key}: ",
+                        style: const TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                      TextSpan(text: valor),
+                    ],
+                  ),
+                ),
+              );
+            }).toList(),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text("Cerrar"),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text("Gestión de Clientes"),
+        backgroundColor: AppColors.primary,
+        foregroundColor: Colors.white,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.person_add_rounded),
+            tooltip: "Nuevo Cliente",
+            onPressed: widget.onNuevoCliente,
+          ),
+          const SizedBox(width: 8),
+        ],
+      ),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(15),
+            child: TextField(
+              decoration: InputDecoration(
+                hintText: "Buscar cliente...",
+                prefixIcon: const Icon(Icons.search),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(15),
+                ),
+                filled: true,
+                fillColor: Theme.of(context).cardColor,
+              ),
+              onChanged: (v) => setState(() => _filtro = v.toLowerCase()),
+            ),
+          ),
+          Expanded(
+            child: StreamBuilder<List<QueryDocumentSnapshot>>(
+              stream: widget.dbService.streamClientes(),
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+                final allClients = snapshot.data ?? [];
+                final clientes = allClients.where((doc) {
+                  final data = doc.data() as Map<String, dynamic>;
+                  final nombre =
+                      "${data['Nombre'] ?? ''} ${data['Apellido'] ?? ''}"
+                          .toLowerCase();
+                  return nombre.contains(_filtro);
+                }).toList();
+
+                if (clientes.isEmpty) {
+                  return const Center(
+                    child: Text("No hay clientes registrados"),
+                  );
+                }
+
+                return ListView.separated(
+                  padding: const EdgeInsets.all(15),
+                  itemCount: clientes.length,
+                  separatorBuilder: (context, index) => const Divider(),
+                  itemBuilder: (context, index) {
+                    final data = clientes[index].data() as Map<String, dynamic>;
+                    final String cid = clientes[index].id;
+                    final String nombre =
+                        "${data['Nombre'] ?? ''} ${data['Apellido'] ?? ''}";
+                    final String cedula = data['Cedula'] ?? 'S/C';
+
+                    return ListTile(
+                      onTap: () => _mostrarDetallesCliente(data),
+                      leading: CircleAvatar(
+                        backgroundColor: Colors.green.withValues(alpha: 0.1),
+                        child: const Icon(
+                          Icons.person_rounded,
+                          color: Colors.green,
+                        ),
+                      ),
+                      title: Text(
+                        nombre,
+                        style: const TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                      subtitle: Text("Cédula: V-$cedula"),
+                      trailing: IconButton(
+                        icon: const Icon(
+                          Icons.delete_outline_rounded,
+                          color: Colors.red,
+                        ),
+                        tooltip: "Eliminar Cliente",
+                        onPressed: () => _confirmarEliminacion(cid, nombre),
+                      ),
+                    );
+                  },
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _confirmarEliminacion(String id, String nombre) {
+    showDialog(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text("Eliminar Cliente"),
+        content: Text("¿Estás seguro de eliminar permanentemente a $nombre?"),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text("Cancelar"),
+          ),
+          ElevatedButton(
+            onPressed: () async {
+              Navigator.pop(dialogContext);
+              await widget.dbService.eliminarCliente(id, nombre);
+              if (!mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text("Cliente eliminado")),
+              );
+            },
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            child: const Text("Eliminar"),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// --- Monitor de Errores ---
+class MonitorErroresScreen extends StatelessWidget {
+  const MonitorErroresScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final db = DatabaseService();
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text("Monitor de Errores"),
+        backgroundColor: Colors.redAccent,
+      ),
+      body: StreamBuilder<QuerySnapshot>(
+        stream: db.streamErroresSistema(),
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
+            return const Center(
+              child: Text("No se han reportado errores técnicos."),
+            );
+          }
+
+          final logs = snapshot.data!.docs;
+          return ListView.builder(
+            padding: const EdgeInsets.all(15),
+            itemCount: logs.length,
+            itemBuilder: (context, index) {
+              final data = logs[index].data() as Map<String, dynamic>;
+              final DateTime fecha =
+                  (data['fecha'] as Timestamp?)?.toDate() ?? DateTime.now();
+
+              return Card(
+                margin: const EdgeInsets.only(bottom: 15),
+                child: ExpansionTile(
+                  leading: const Icon(
+                    Icons.warning_amber_rounded,
+                    color: Colors.red,
+                  ),
+                  title: Text(
+                    data['contexto'] ?? "Error desconocido",
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  subtitle: Text(
+                    "${fecha.day}/${fecha.month} ${fecha.hour}:${fecha.minute} - ${data['usuario']}",
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.all(15),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text(
+                            "Mensaje de Error:",
+                            style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              color: Colors.red,
+                            ),
+                          ),
+                          const SizedBox(height: 5),
+                          SelectableText(
+                            data['error'] ?? "Sin mensaje",
+                            style: const TextStyle(
+                              fontFamily: 'monospace',
+                              fontSize: 13,
+                            ),
+                          ),
+                          const Divider(),
+                          Text("Dispositivo: ${data['dispositivo']}"),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            },
+          );
+        },
+      ),
+    );
+  }
 }

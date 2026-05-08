@@ -324,12 +324,65 @@ class _RegistroTrabajadorScreenState extends State<RegistroTrabajadorScreen> {
                                 },
                               ),
                               const SizedBox(height: 20),
-                              _buildTextField(
-                                controller: _rolController,
-                                label: "Rol asignado",
-                                icon: Icons.work_outline,
-                                readOnly: true,
-                                isDark: isDark,
+                              DropdownButtonFormField<String>(
+                                initialValue: _rolController.text.isEmpty
+                                    ? 'Empleado'
+                                    : (_rolController.text == 'supervisor'
+                                          ? 'Supervisor'
+                                          : (_rolController.text == 'admin'
+                                                ? 'Administrador'
+                                                : 'Empleado')),
+                                decoration: InputDecoration(
+                                  labelText: "Rol solicitado",
+                                  labelStyle: TextStyle(
+                                    color: isDark
+                                        ? Colors.white70
+                                        : Colors.black54,
+                                  ),
+                                  prefixIcon: const Icon(
+                                    Icons.work_outline,
+                                    color: AppColors.secondary,
+                                    size: 20,
+                                  ),
+                                  filled: true,
+                                  fillColor: isDark
+                                      ? Colors.white.withAlpha(20)
+                                      : Colors.black.withAlpha(10),
+                                  border: OutlineInputBorder(
+                                    borderRadius: BorderRadius.circular(15),
+                                    borderSide: BorderSide.none,
+                                  ),
+                                ),
+                                dropdownColor: isDark
+                                    ? const Color(0xFF1E1E1E)
+                                    : Colors.white,
+                                items:
+                                    ["Empleado", "Supervisor", "Administrador"]
+                                        .map(
+                                          (e) => DropdownMenuItem(
+                                            value: e,
+                                            child: Text(
+                                              e,
+                                              style: TextStyle(
+                                                color: isDark
+                                                    ? Colors.white
+                                                    : Colors.black87,
+                                              ),
+                                            ),
+                                          ),
+                                        )
+                                        .toList(),
+                                onChanged: (val) {
+                                  setState(() {
+                                    if (val == "Supervisor") {
+                                      _rolController.text = "supervisor";
+                                    } else if (val == "Administrador") {
+                                      _rolController.text = "admin";
+                                    } else {
+                                      _rolController.text = "Empleado";
+                                    }
+                                  });
+                                },
                                 validator: (val) {
                                   if (val == null || val.isEmpty) {
                                     return "Este campo es obligatorio";

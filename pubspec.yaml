@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.0.0+1
+version: 1.0.0+2
 
 environment:
   sdk: ^3.11.1
@@ -46,6 +46,10 @@ dependencies:
   phosphor_flutter: ^2.1.0
   flutter_local_notifications: ^21.0.0
   googleapis_auth: ^2.0.0
+  package_info_plus: ^10.0.0
+  dio: ^5.9.2
+  path_provider: ^2.1.5
+  open_filex: ^4.7.0
   #googleapis_auth: ^2.0.0
 
 dev_dependencies:
@@ -77,6 +81,7 @@ flutter:
 
   assets:
     - assets/frifalca6.png
+    - assets/icon_web.png
 
   # To add assets to your application, add an assets section, like this:
   # assets:

@@ -47,10 +47,10 @@ class AppColors {
 class AppTheme {
   // Tamaños de fuente centralizados para consistencia
   static const double displayLargeSize = 24;
-  static const double headlineMediumSize = 20;
-  static const double titleMediumSize = 16;
+  static const double headlineMediumSize = 20; // 1.2rem
+  static const double titleMediumSize = 16; // 1rem
   static const double bodyLargeSize = 14;
-  static const double bodyMediumSize = 13;
+  static const double bodyMediumSize = 13; // 0.8rem
   static const double labelSmallSize = 11;
 
   static const double titleLineHeight = 1.2;

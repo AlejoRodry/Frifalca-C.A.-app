@@ -55,9 +55,9 @@ class AyudaScreen extends StatelessWidget {
                 title: "Gestión de Inventario",
                 description:
                     "El sistema gestiona tres tipos de stock:\n\n"
-                    "• Físico: Cantidad real de hielo en cava.\n"
-                    "• Comprometido: Hielo reservado por pedidos pendientes.\n"
-                    "• Disponible: Stock real listo para la venta.\n\n"
+                    "- Físico: Cantidad real de hielo en cava.\n"
+                    "- Comprometido: Hielo reservado por pedidos pendientes.\n"
+                    "- Disponible: Stock real listo para la venta.\n\n"
                     "Al despachar un pedido, el sistema descuenta automáticamente las unidades del stock físico.",
               ),
               const SizedBox(height: 20),
@@ -78,9 +78,9 @@ class AyudaScreen extends StatelessWidget {
                 description:
                     "Implementamos el protocolo HTTP v1 de Firebase Cloud Messaging para garantizar que "
                     "todas las alertas críticas lleguen al instante. Recibirás avisos sobre:\n\n"
-                    "• Niveles de stock críticos.\n"
-                    "• Paradas programadas de producción.\n"
-                    "• Actualizaciones importantes del sistema.",
+                    "- Niveles de stock críticos.\n"
+                    "- Paradas programadas de producción.\n"
+                    "- Actualizaciones importantes del sistema.",
               ),
               const SizedBox(height: 40),
               Center(

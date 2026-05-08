@@ -1,39 +1,14 @@
 import 'package:flutter/foundation.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:http/http.dart' as http;
+import 'dart:convert';
 import 'modelo_pedidos.dart';
+import 'servicios_de_notificaciones.dart';
 
 class DatabaseService {
   final FirebaseFirestore _db = FirebaseFirestore.instance;
-
-  // --- NOTIFICACIONES ---
-  // IMPORTANTE: La lógica de envío de notificaciones directas (FCM V1) ha sido eliminada por seguridad.
-  // Estas operaciones deben realizarse desde un servidor seguro o Firebase Functions.
-
-  Future<void> guardarTokenDispositivo() async {
-    try {
-      final user = FirebaseAuth.instance.currentUser;
-      if (user == null) return;
-
-      String? token = await FirebaseMessaging.instance.getToken();
-      if (token != null) {
-        await _db.collection('TokensNotificacion').doc(user.uid).set({
-          'token': token,
-          'email': user.email,
-          'ultima_actualizacion': FieldValue.serverTimestamp(),
-          'ultima_modificacion': FieldValue.serverTimestamp(),
-        }, SetOptions(merge: true));
-      }
-    } catch (e) {
-      debugPrint("Error al guardar token: $e");
-    }
-  }
-
-  Future<void> enviarNotificacionGlobal(String titulo, String cuerpo) async {
-    // Funcionalidad desactivada en el cliente para proteger credenciales.
-    debugPrint("Simulación de notificación (Backend requerido): $titulo");
-  }
+  final NotificationService _notificationService = NotificationService();
 
   // --- BITÁCORA (Privada para escritura) ---
   Future<void> _registrarEvento({
@@ -63,11 +38,42 @@ class DatabaseService {
     }
   }
 
+  // --- LOG DE ERRORES (Público para reporte) ---
+  Future<void> registrarErrorSistema({
+    required String contexto,
+    required String error,
+    String? stackTrace,
+  }) async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      await _db.collection('LogsErrores').add({
+        'contexto': contexto,
+        'error': error.toString(),
+        'stackTrace': stackTrace?.toString(),
+        'usuario': user?.email ?? 'Desconocido',
+        'fecha': FieldValue.serverTimestamp(),
+        'dispositivo': kIsWeb ? 'Navegador Web' : 'Dispositivo Móvil',
+      });
+    } catch (e) {
+      debugPrint("Falla crítica al registrar error de sistema: $e");
+    }
+  }
+
+  Stream<QuerySnapshot> streamErroresSistema() {
+    return _db
+        .collection('LogsErrores')
+        .orderBy('fecha', descending: true)
+        .limit(50)
+        .snapshots();
+  }
+
   // --- BITÁCORA (Lectura Protegida) ---
   Stream<List<QueryDocumentSnapshot>> streamBitacora({
     String? filtroNombre,
     String? filtroCorreo,
     String? filtroAccion,
+    DateTime? fechaInicio,
+    DateTime? fechaFin,
   }) {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null || user.email == null) {
@@ -100,12 +106,24 @@ class DatabaseService {
           }
 
           // Consulta base optimizada por fecha.
-          // El filtrado de texto se hará localmente para permitir case-insensitive (toLowerCase)
-          // y evitar errores de 'indices compuestos' en NoSQL si no están creados.
-          return _db
+          Query query = _db
               .collection('Bitacora')
-              .orderBy('fecha', descending: true)
-              .snapshots();
+              .orderBy('fecha', descending: true);
+
+          if (fechaInicio != null) {
+            query = query.where(
+              'fecha',
+              isGreaterThanOrEqualTo: Timestamp.fromDate(fechaInicio),
+            );
+          }
+          if (fechaFin != null) {
+            query = query.where(
+              'fecha',
+              isLessThanOrEqualTo: Timestamp.fromDate(fechaFin),
+            );
+          }
+
+          return query.snapshots();
         })
         .map((snapshot) {
           List<QueryDocumentSnapshot> docs = snapshot.docs;
@@ -145,6 +163,17 @@ class DatabaseService {
         });
   }
 
+  /// Streaming simplificado de la Bitácora para el "Centro de Notificaciones"
+  /// Accesible para todos los trabajadores registrados
+  Stream<List<QueryDocumentSnapshot>> streamNotificaciones({int limite = 20}) {
+    return _db
+        .collection('Bitacora')
+        .orderBy('fecha', descending: true)
+        .limit(limite)
+        .snapshots()
+        .map((snapshot) => snapshot.docs);
+  }
+
   // --- GESTIÓN DE CLIENTES ---
   Future<void> registrarCliente({
     required String nombre,
@@ -167,6 +196,18 @@ class DatabaseService {
       );
     } catch (e) {
       throw Exception("Error al registrar cliente: $e");
+    }
+  }
+
+  Future<void> eliminarCliente(String id, String nombre) async {
+    try {
+      await _db.collection('Clientes').doc(id).delete();
+      await _registrarEvento(
+        accion: 'CLIENTE_ELIMINADO',
+        detalle: 'Se eliminó al cliente: $nombre',
+      );
+    } catch (e) {
+      throw Exception("Error al eliminar cliente: $e");
     }
   }
 
@@ -267,29 +308,67 @@ class DatabaseService {
     DateTime? fechaInicio,
     DateTime? fechaFin,
   }) {
-    Query query = _db.collection('Pedidos').orderBy('fecha', descending: true);
+    try {
+      // Consulta ultra-flexible: Sin ordenamiento en el servidor para evitar exclusiones
+      Query query = _db.collection('Pedidos');
 
-    if (filtroTicket != null && filtroTicket.isNotEmpty) {
-      query = query
-          .where('N_ticket', isGreaterThanOrEqualTo: filtroTicket)
-          .where('N_ticket', isLessThanOrEqualTo: '$filtroTicket\uf8ff');
+      if (filtroEstado != null && filtroEstado != "Todos") {
+        query = query.where('estado', isEqualTo: filtroEstado);
+      }
+
+      if (fechaInicio != null && fechaFin != null) {
+        query = query
+            .where('fecha', isGreaterThanOrEqualTo: fechaInicio)
+            .where('fecha', isLessThanOrEqualTo: fechaFin);
+      }
+
+      return query
+          .snapshots()
+          .map((snapshot) {
+            // 1. Convertir y filtrar por Ticket manualmente
+            List<Pedido> pedidos = snapshot.docs.map((doc) {
+              return Pedido.fromFirestore(doc);
+            }).toList();
+
+            if (filtroTicket != null && filtroTicket.trim().isNotEmpty) {
+              final String queryNormalizada = filtroTicket.trim().toLowerCase();
+              pedidos = pedidos.where((p) {
+                // Normalización y limpieza de espacios en blanco
+                final String ticketNormalizado = p.ticket.trim().toLowerCase();
+                return ticketNormalizado.contains(queryNormalizada);
+              }).toList();
+            }
+
+            // 2. Ordenar manualmente (Descendente: los nuevos arriba)
+            pedidos.sort((a, b) {
+              final dateA = a.fecha ?? DateTime(2000);
+              final dateB = b.fecha ?? DateTime(2000);
+              return dateB.compareTo(dateA);
+            });
+
+            return pedidos;
+          })
+          .handleError((error) {
+            debugPrint("-------------------------------------------");
+            debugPrint("ERROR EN STREAM_PEDIDOS:");
+            debugPrint("Detalle: $error");
+            if (error.toString().contains("composite index")) {
+              debugPrint(
+                "NECESITAS UN ÍNDICE COMPUESTO. Revisa la consola de Firebase.",
+              );
+            }
+            debugPrint("-------------------------------------------");
+
+            // Reportar el error al log persistente
+            registrarErrorSistema(
+              contexto: "DatabaseService.streamPedidos",
+              error: error.toString(),
+            );
+          });
+    } catch (e) {
+      debugPrint("Error al inicializar query en streamPedidos: $e");
+      return const Stream.empty();
     }
-
-    if (filtroEstado != null && filtroEstado != "Todos") {
-      query = query.where('estado', isEqualTo: filtroEstado);
-    }
-
-    // Nota: El filtrado por fecha exacto en Firestore requiere un rango
-    if (fechaInicio != null && fechaFin != null) {
-      query = query
-          .where('fecha', isGreaterThanOrEqualTo: fechaInicio)
-          .where('fecha', isLessThanOrEqualTo: fechaFin);
-    }
-
-    return query.snapshots().map(
-      (snapshot) =>
-          snapshot.docs.map((doc) => Pedido.fromFirestore(doc)).toList(),
-    );
   }
 
   Future<Pedido?> getPedidoById(String id) async {
@@ -372,34 +451,205 @@ class DatabaseService {
     }
   }
 
+  // --- GESTIÓN DE TASA DE CAMBIO ---
+  Stream<DocumentSnapshot> streamConfiguracionTasa() {
+    return _db.collection('Configuraciones').doc('tasa_cambio').snapshots();
+  }
+
+  Future<double> obtenerTasaVigente() async {
+    try {
+      final doc = await _db
+          .collection('Configuraciones')
+          .doc('tasa_cambio')
+          .get();
+      if (!doc.exists) {
+        // Inicializar si no existe
+        await _db.collection('Configuraciones').doc('tasa_cambio').set({
+          'usar_automatica': false,
+          'valor_manual': 1.0,
+          'ultima_bcv': 1.0,
+          'fecha_actualizacion': FieldValue.serverTimestamp(),
+        });
+        return 1.0;
+      }
+
+      final data = doc.data() as Map<String, dynamic>;
+      bool usarAuto = data['usar_automatica'] ?? false;
+      double valorManual = (data['valor_manual'] ?? 0.0).toDouble();
+
+      if (usarAuto) {
+        try {
+          // Uso de Proxy AllOrigins para evitar bloqueos de CORS en Flutter Web
+          // La URL original se codifica para ser enviada como parámetro al proxy
+          final String apiUrl = 'https://ve.dolarapi.com/v1/dolares/oficial';
+          final response = await http.get(
+            Uri.parse(
+              'https://api.allorigins.win/get?url=${Uri.encodeComponent(apiUrl)}',
+            ),
+          );
+
+          if (response.statusCode == 200) {
+            // PRIMER jsonDecode: Desenvuelve el wrapper de AllOrigins
+            // AllOrigins devuelve un objeto con la forma: {"contents": "string_con_el_json_real", ...}
+            final wrapper = jsonDecode(response.body);
+            final String contents = wrapper['contents'];
+
+            // SEGUNDO jsonDecode: Decodifica el JSON real de la tasa contenido en 'contents'
+            final json = jsonDecode(contents);
+
+            // ve.dolarapi.com usa 'promedio' o 'price' para el valor oficial
+            double bcvPrice = (json['promedio'] ?? json['price'] ?? 0.0)
+                .toDouble();
+
+            if (bcvPrice > 0) {
+              await _db
+                  .collection('Configuraciones')
+                  .doc('tasa_cambio')
+                  .update({
+                    'ultima_bcv': bcvPrice,
+                    'fecha_actualizacion': FieldValue.serverTimestamp(),
+                  });
+              return bcvPrice;
+            }
+          }
+        } catch (apiError) {
+          // Si el proxy falla o hay error de red, silenciamos y retornamos el valor manual configurado
+          debugPrint(
+            "Error crítico consultando Proxy AllOrigins/API: $apiError",
+          );
+        }
+        return valorManual;
+      } else {
+        return valorManual;
+      }
+    } catch (e) {
+      debugPrint("Error en obtenerTasaVigente: $e");
+      return 1.0;
+    }
+  }
+
+  Future<void> actualizarConfiguracionTasa({
+    bool? usarAuto,
+    double? valorManual,
+  }) async {
+    final Map<String, dynamic> data = {};
+    if (usarAuto != null) {
+      data['usar_automatica'] = usarAuto;
+    }
+    if (valorManual != null) {
+      data['valor_manual'] = valorManual;
+    }
+    data['ultima_modificacion'] = FieldValue.serverTimestamp();
+
+    await _db.collection('Configuraciones').doc('tasa_cambio').update(data);
+    await _registrarEvento(
+      accion: 'CONFIG_TASA_ACTUALIZADA',
+      detalle: 'Se actualizó la configuración de la tasa de cambio.',
+    );
+  }
+
+  // --- AJUSTES DEL SISTEMA ---
+  Future<void> actualizarAjustesSistema({
+    bool? notificacionesStockBajo,
+    bool? actualizacionesAutomaticas,
+    bool? calcularPreciosAuto,
+    bool? mostrarPanelLateral,
+    int? itemsPorPagina,
+    bool? disenoCompacto,
+    bool? disenoPedidosLargo,
+  }) async {
+    final Map<String, dynamic> data = {};
+    if (notificacionesStockBajo != null) {
+      data['notificaciones_stock_bajo'] = notificacionesStockBajo;
+    }
+    if (actualizacionesAutomaticas != null) {
+      data['actualizaciones_automaticas'] = actualizacionesAutomaticas;
+    }
+    if (calcularPreciosAuto != null) {
+      data['calcular_precios_auto'] = calcularPreciosAuto;
+    }
+    if (mostrarPanelLateral != null) {
+      data['mostrar_panel_lateral'] = mostrarPanelLateral;
+    }
+    if (itemsPorPagina != null) {
+      data['items_por_pagina'] = itemsPorPagina;
+    }
+    if (disenoCompacto != null) {
+      data['diseno_compacto'] = disenoCompacto;
+    }
+    if (disenoPedidosLargo != null) {
+      data['diseno_pedidos_largo'] = disenoPedidosLargo;
+    }
+    data['ultima_modificacion'] = FieldValue.serverTimestamp();
+
+    await _db
+        .collection('Configuraciones')
+        .doc('ajustes_sistema')
+        .set(data, SetOptions(merge: true));
+
+    // Si calcularPreciosAuto cambió, sincronizamos con tasa_cambio por consistencia
+    if (calcularPreciosAuto != null) {
+      await _db.collection('Configuraciones').doc('tasa_cambio').update({
+        'usar_automatica': calcularPreciosAuto,
+        'ultima_modificacion': FieldValue.serverTimestamp(),
+      });
+    }
+
+    await _registrarEvento(
+      accion: 'AJUSTES_SISTEMA_ACTUALIZADOS',
+      detalle: 'Se actualizaron los ajustes generales del sistema.',
+    );
+  }
+
+  Stream<DocumentSnapshot> streamAjustesSistema() {
+    return _db.collection('Configuraciones').doc('ajustes_sistema').snapshots();
+  }
+
   Future<void> despacharPedido(
     String idDoc,
-    String nombreDespachador, {
+    String nombreDespachador,
+    String rolDespachador, {
     int? cantSaco,
     int? cantBolsa,
   }) async {
     try {
       // VALIDACIÓN DE STOCK: Verificar stock suficiente antes de despachar
-      if (cantSaco != null && cantSaco > 0) {
-        const idProdSaco = "NZAtCFwTfLTwb3xiiOUk";
-        final snapSaco = await _db.collection('Productos').doc(idProdSaco).get();
-        if (snapSaco.exists) {
-          final data = snapSaco.data() as Map?;
-          int stockFisico = (data?['stock_fisico'] as num? ?? 0).toInt();
-          if (stockFisico < cantSaco) {
-            throw Exception("Stock insuficiente para realizar la operación. Stock disponible de sacos: $stockFisico");
+      // Los roles Admin y Supervisor pueden saltar esta validación (autorización especial)
+      bool esAutorizado =
+          rolDespachador == "admin" || rolDespachador == "supervisor";
+
+      if (!esAutorizado) {
+        if (cantSaco != null && cantSaco > 0) {
+          const idProdSaco = "NZAtCFwTfLTwb3xiiOUk";
+          final snapSaco = await _db
+              .collection('Productos')
+              .doc(idProdSaco)
+              .get();
+          if (snapSaco.exists) {
+            final data = snapSaco.data() as Map?;
+            int stockFisico = (data?['stock_fisico'] as num? ?? 0).toInt();
+            if (stockFisico < cantSaco) {
+              throw Exception(
+                "Stock insuficiente. Se requiere autorización de un Supervisor o Admin para despachar sin stock físico.",
+              );
+            }
           }
         }
-      }
 
-      if (cantBolsa != null && cantBolsa > 0) {
-        const idProdBolsa = "DWDbVnRf5nqGu8uTu3KA";
-        final snapBolsa = await _db.collection('Productos').doc(idProdBolsa).get();
-        if (snapBolsa.exists) {
-          final data = snapBolsa.data() as Map?;
-          int stockFisico = (data?['stock_fisico'] as num? ?? 0).toInt();
-          if (stockFisico < cantBolsa) {
-            throw Exception("Stock insuficiente para realizar la operación. Stock disponible de bolsas: $stockFisico");
+        if (cantBolsa != null && cantBolsa > 0) {
+          const idProdBolsa = "DWDbVnRf5nqGu8uTu3KA";
+          final snapBolsa = await _db
+              .collection('Productos')
+              .doc(idProdBolsa)
+              .get();
+          if (snapBolsa.exists) {
+            final data = snapBolsa.data() as Map?;
+            int stockFisico = (data?['stock_fisico'] as num? ?? 0).toInt();
+            if (stockFisico < cantBolsa) {
+              throw Exception(
+                "Stock insuficiente. Se requiere autorización de un Supervisor o Admin para despachar sin stock físico.",
+              );
+            }
           }
         }
       }
@@ -449,6 +699,18 @@ class DatabaseService {
           'stock_fisico': FieldValue.increment(-cantSaco),
           'stock_comprometido': FieldValue.increment(-cantSaco),
         });
+
+        // --- DISPARADOR DE NOTIFICACIÓN DE STOCK BAJO ---
+        try {
+          final data = snap.data() as Map?;
+          final int stockPrevio = (data?['stock_fisico'] as num? ?? 0).toInt();
+          final int stockNuevo = stockPrevio - cantSaco;
+          if (stockNuevo < 15) {
+            _notificationService.notificarStockBajo("SACO", stockNuevo);
+          }
+        } catch (e) {
+          debugPrint("Error en trigger de stock bajo (Saco): $e");
+        }
       }
 
       if (cantBolsa != null && cantBolsa > 0) {
@@ -484,6 +746,18 @@ class DatabaseService {
           'stock_fisico': FieldValue.increment(-cantBolsa),
           'stock_comprometido': FieldValue.increment(-cantBolsa),
         });
+
+        // --- DISPARADOR DE NOTIFICACIÓN DE STOCK BAJO ---
+        try {
+          final data = snap.data() as Map?;
+          final int stockPrevio = (data?['stock_fisico'] as num? ?? 0).toInt();
+          final int stockNuevo = stockPrevio - cantBolsa;
+          if (stockNuevo < 15) {
+            _notificationService.notificarStockBajo("BOLSA", stockNuevo);
+          }
+        } catch (e) {
+          debugPrint("Error en trigger de stock bajo (Bolsa): $e");
+        }
       }
 
       await batch.commit();
@@ -530,7 +804,9 @@ class DatabaseService {
         final data = snap.data() as Map?;
         int stockFisico = (data?['stock_fisico'] as num? ?? 0).toInt();
         if (stockFisico < -cambio) {
-          throw Exception("Stock insuficiente para realizar la operación. Stock disponible: $stockFisico");
+          throw Exception(
+            "Stock insuficiente para realizar la operación. Stock disponible: $stockFisico",
+          );
         }
       }
 
@@ -542,9 +818,25 @@ class DatabaseService {
       }, SetOptions(merge: true));
       debugPrint("¡Éxito en la actualización de stock!");
 
-      // Determinar tipo de movimiento y nombre del producto
+      // Determinar nombre del producto y tipo de movimiento
+      String nombreProducto = idDoc == "NZAtCFwTfLTwb3xiiOUk"
+          ? "SACO"
+          : "BOLSA";
       String tipoMovimiento = cambio >= 0 ? 'ENTRADA' : 'SALIDA';
-      String nombreProducto = idDoc == "NZAtCFwTfLTwb3xiiOUk" ? "SACO" : "BOLSA";
+
+      // --- DISPARADOR DE NOTIFICACIÓN DE STOCK BAJO ---
+      try {
+        final int stockPrevio = (snap.data() as Map?)?['stock_fisico'] ?? 0;
+        final int stockNuevo = stockPrevio + cambio;
+
+        // Umbral de ejemplo: 15 unidades. Podría leerse de ajustes_sistema.
+        if (stockNuevo < 15 && cambio < 0) {
+          _notificationService.notificarStockBajo(nombreProducto, stockNuevo);
+        }
+      } catch (e) {
+        debugPrint("Error en trigger de stock bajo: $e");
+      }
+
       int cantidadAbsoluta = cambio.abs();
 
       // 2. Registrar en Bitácora con motivo
@@ -633,6 +925,7 @@ class DatabaseService {
     String? detalleSaco,
     String? detalleBolsa,
     String? idCliente,
+    double? tasaAplicada,
   }) async {
     try {
       WriteBatch batch = _db.batch();
@@ -694,6 +987,7 @@ class DatabaseService {
         'creado_por': nombreCreador,
         'sin_stock': faltaStock,
         'id_cliente': idCliente,
+        'tasa_aplicada': tasaAplicada ?? 0.0,
         'ultima_modificacion': FieldValue.serverTimestamp(),
       });
 
@@ -722,11 +1016,8 @@ class DatabaseService {
       }
       await batch.commit();
 
-      // 4. Notificación Automática (Fuera del batch pero reactivo)
-      enviarNotificacionGlobal(
-        "¡Nuevo Pedido Registrado!",
-        "Ticket: $ticket - Monto: $monto Bs. por $nombreCreador",
-      );
+      // 4. Notificación Automática (Prioridad ALTA vía GAS)
+      _notificationService.notificarNuevoPedido(ticket, monto);
 
       await _registrarEvento(
         accion: 'PEDIDO_CREADO',
@@ -760,12 +1051,14 @@ class DatabaseService {
     final inicio = DateTime(fecha.year, fecha.month, fecha.day);
     final fin = inicio.add(const Duration(days: 1));
 
+    // Hemos simplificado la consulta eliminando el orderBy('slot')
+    // para evitar la necesidad de crear un índice compuesto manual.
+    // El ordenamiento se maneja automáticamente en la UI al asignar slots.
     return _db
         .collection('Citas')
-        .where('fecha', isGreaterThanOrEqualTo: inicio)
-        .where('fecha', isLessThan: fin)
+        .where('fecha', isGreaterThanOrEqualTo: Timestamp.fromDate(inicio))
+        .where('fecha', isLessThan: Timestamp.fromDate(fin))
         .orderBy('fecha')
-        .orderBy('slot')
         .snapshots()
         .map(
           (snap) => snap.docs.map((doc) => Cita.fromFirestore(doc)).toList(),
@@ -773,19 +1066,37 @@ class DatabaseService {
   }
 
   Future<void> agendarCita(Cita cita) async {
-    await _db.collection('Citas').add({
-      'nombre': cita.nombre,
-      'motivo': cita.motivo,
-      'fecha': Timestamp.fromDate(cita.fecha),
-      'slot': cita.slot,
-      'id_pedido': cita.idPedido,
-      'id_cliente': cita.idCliente,
-      'nombre_cliente': cita.nombreCliente,
-      'color_etiqueta': cita.colorEtiqueta,
-      'estado_agendado': cita.estadoAgendado,
-      'creado_en': FieldValue.serverTimestamp(),
-      'ultima_modificacion': FieldValue.serverTimestamp(),
-    });
+    try {
+      await _db.collection('Citas').add({
+        'nombre': cita.nombre,
+        'motivo': cita.motivo,
+        'fecha': Timestamp.fromDate(cita.fecha),
+        'slot': cita.slot,
+        'id_pedido': cita.idPedido,
+        'id_cliente': cita.idCliente,
+        'nombre_cliente': cita.nombreCliente,
+        'color_etiqueta': cita.colorEtiqueta,
+        'estado_agendado': cita.estadoAgendado,
+        'creado_en': FieldValue.serverTimestamp(),
+        'ultima_modificacion': FieldValue.serverTimestamp(),
+        'creado_por': FirebaseAuth.instance.currentUser?.email,
+      });
+
+      await _registrarEvento(
+        accion: 'CITA_AGENDADA',
+        detalle:
+            'Cita agendada para ${cita.nombreCliente ?? cita.nombre} en el slot ${cita.slot} para el día ${cita.fecha.day}/${cita.fecha.month}',
+      );
+
+      // --- DISPARADOR DE NOTIFICACIÓN DE CITA ---
+      _notificationService.notificarCitaAgendada(
+        cita.nombreCliente ?? cita.nombre,
+        "${cita.fecha.day}/${cita.fecha.month}",
+      );
+    } catch (e) {
+      debugPrint("Error en agendarCita: $e");
+      rethrow;
+    }
   }
 
   Future<void> crearCita({
@@ -815,8 +1126,78 @@ class DatabaseService {
     );
   }
 
-  Future<void> cancelarCita(String idCita) async {
+  /// Cancela una cita y la elimina de la agenda, registrando en bitácora.
+  Future<void> cancelarCita(String idCita, {String? motivo}) async {
+    // Leemos la cita antes de eliminarla para dejar registro
+    final doc = await _db.collection('Citas').doc(idCita).get();
+    String detalle = 'Cita ID: $idCita eliminada.';
+    if (doc.exists) {
+      final d = doc.data() as Map<String, dynamic>;
+      detalle =
+          'Cita cancelada para ${d['nombre_cliente'] ?? d['nombre']} slot ${d['slot']}. Motivo: ${motivo ?? 'No especificado'}';
+    }
     await _db.collection('Citas').doc(idCita).delete();
+    await _registrarEvento(accion: 'CITA_CANCELADA', detalle: detalle);
+  }
+
+  /// Reagenda una cita a una nueva fecha y slot de hora.
+  Future<void> reagendarCita(
+    String idCita,
+    DateTime nuevaFecha,
+    String nuevoSlot,
+  ) async {
+    await _db.collection('Citas').doc(idCita).update({
+      'fecha': Timestamp.fromDate(nuevaFecha),
+      'slot': nuevoSlot,
+      'estado_agendado': false,
+      'color_etiqueta': '#FFA500',
+      'ultima_modificacion': FieldValue.serverTimestamp(),
+    });
+    await _registrarEvento(
+      accion: 'CITA_REAGENDADA',
+      detalle:
+          'Cita ID: $idCita reagendada al ${nuevaFecha.day}/${nuevaFecha.month}/${nuevaFecha.year} a las $nuevoSlot.',
+    );
+  }
+
+  /// Marca la cita como completada (retirada). Si tiene un pedido asociado, lo despacha también.
+  Future<void> marcarCitaComoRetirada({
+    required String idCita,
+    required String? idPedido,
+    required String despachadorNombre,
+    required String despachadorRol,
+    int cantSaco = 0,
+    int cantBolsa = 0,
+  }) async {
+    // 1. Marcar la cita como completada
+    await _db.collection('Citas').doc(idCita).update({
+      'estado_agendado': true,
+      'color_etiqueta': '#4CAF50',
+      'ultima_modificacion': FieldValue.serverTimestamp(),
+    });
+
+    // 2. Si hay pedido asociado, despacharlo automáticamente
+    if (idPedido != null && idPedido.isNotEmpty) {
+      try {
+        final pedidoDoc = await _db.collection('Pedidos').doc(idPedido).get();
+        if (pedidoDoc.exists) {
+          final pedidoData = pedidoDoc.data() as Map<String, dynamic>;
+          final String estadoActual = pedidoData['estado'] ?? 'Pendiente';
+          // Solo despachar si aún está Pendiente (evitar doble despacho)
+          if (estadoActual == 'Pendiente') {
+            await despacharPedido(
+              idPedido,
+              despachadorNombre,
+              despachadorRol,
+              cantSaco: cantSaco,
+              cantBolsa: cantBolsa,
+            );
+          }
+        }
+      } catch (e) {
+        debugPrint('Error al despachar pedido asociado a cita: $e');
+      }
+    }
   }
 
   Future<void> actualizarEstadoAgendado(String idCita, bool completado) async {
@@ -856,6 +1237,7 @@ class DatabaseService {
     String? detalleSaco,
     String? detalleBolsa,
     String? idCliente,
+    double? tasaAplicada,
   }) async {
     try {
       WriteBatch batch = _db.batch();
@@ -888,6 +1270,7 @@ class DatabaseService {
         'N_ticket': ticket,
         'creado_por': nombreCreador,
         'id_cliente': idCliente,
+        'tasa_aplicada': tasaAplicada,
         'ultima_modificacion': FieldValue.serverTimestamp(),
       });
 
@@ -922,9 +1305,14 @@ class DatabaseService {
         );
   }
 
-  Stream<List<Pedido>> streamVentasFiltradas(String filtro) {
+  Stream<List<Pedido>> streamVentasFiltradas(
+    String filtro, {
+    DateTime? fechaInicio,
+    DateTime? fechaFin,
+  }) {
     DateTime now = DateTime.now();
     DateTime inicio;
+    DateTime? fin;
 
     switch (filtro) {
       case 'Día':
@@ -940,19 +1328,121 @@ class DatabaseService {
       case 'Año':
         inicio = DateTime(now.year, 1, 1);
         break;
+      case 'Personalizado':
+        if (fechaInicio != null) {
+          inicio = fechaInicio;
+          fin = fechaFin;
+        } else {
+          inicio = now.subtract(const Duration(days: 7));
+        }
+        break;
       default:
         inicio = now.subtract(const Duration(days: 7));
     }
 
-    return _db
+    Query query = _db
         .collection('Pedidos')
         .where('estado', isEqualTo: 'Despachado')
-        .where('fecha', isGreaterThanOrEqualTo: Timestamp.fromDate(inicio))
+        .where('fecha', isGreaterThanOrEqualTo: Timestamp.fromDate(inicio));
+
+    if (fin != null) {
+      query = query.where(
+        'fecha',
+        isLessThanOrEqualTo: Timestamp.fromDate(fin),
+      );
+    }
+
+    return query
         .orderBy('fecha', descending: true)
         .snapshots()
         .map(
           (snapshot) =>
               snapshot.docs.map((doc) => Pedido.fromFirestore(doc)).toList(),
         );
+  }
+
+  // --- GESTIÓN DE TRABAJADORES (ADMIN) ---
+  Stream<List<QueryDocumentSnapshot>> streamTrabajadores() {
+    return _db.collection('Trabajadores').snapshots().map((snap) => snap.docs);
+  }
+
+  Stream<List<QueryDocumentSnapshot>> streamClientes() {
+    return _db.collection('Clientes').snapshots().map((snap) => snap.docs);
+  }
+
+  Future<void> actualizarEstadoTrabajador(String uid, bool bloqueado) async {
+    await _db.collection('Trabajadores').doc(uid).update({
+      'bloqueado': bloqueado,
+      'ultima_modificacion': FieldValue.serverTimestamp(),
+    });
+
+    await _registrarEvento(
+      accion: bloqueado ? 'USUARIO_BLOQUEADO' : 'USUARIO_DESBLOQUEADO',
+      detalle:
+          'Se ${bloqueado ? "bloqueó" : "desbloqueó"} al usuario con UID: $uid',
+    );
+  }
+
+  Future<void> eliminarTrabajador(String uid) async {
+    final doc = await _db.collection('Trabajadores').doc(uid).get();
+    final data = doc.data();
+    final email = data?['correo'] ?? 'Desconocido';
+
+    await _db.collection('Trabajadores').doc(uid).delete();
+
+    await _registrarEvento(
+      accion: 'USUARIO_ELIMINADO',
+      detalle: 'Se eliminaró al usuario: $email con UID: $uid',
+    );
+  }
+
+  dynamic _sanitizeFirestoreData(dynamic value) {
+    if (value is Timestamp) {
+      return value.toDate().toIso8601String();
+    } else if (value is GeoPoint) {
+      return {'lat': value.latitude, 'lng': value.longitude};
+    } else if (value is DocumentReference) {
+      return value.path;
+    } else if (value is Map) {
+      final Map<String, dynamic> newMap = {};
+      value.forEach((k, v) {
+        newMap[k as String] = _sanitizeFirestoreData(v);
+      });
+      return newMap;
+    } else if (value is List) {
+      return value.map((v) => _sanitizeFirestoreData(v)).toList();
+    }
+    return value;
+  }
+
+  // --- SISTEMA DE RESPALDO (BACKUP) ---
+  /// Recolecta todos los datos de las colecciones principales para generar un backup.
+  Future<Map<String, dynamic>> generarDatosRespaldo() async {
+    final Map<String, dynamic> backup = {
+      'fecha_creacion': DateTime.now().toIso8601String(),
+      'app': 'Frifalca C.A.',
+      'datos': {},
+    };
+
+    final colecciones = [
+      'Productos',
+      'Pedidos',
+      'Clientes',
+      'Trabajadores',
+      'Citas',
+      'Bitacora',
+      'Configuraciones',
+    ];
+
+    for (String col in colecciones) {
+      final snap = await _db.collection(col).get();
+      backup['datos'][col] = snap.docs.map((doc) {
+        final data = doc.data();
+        data['id_documento'] = doc.id; // Preservar el ID original
+        return _sanitizeFirestoreData(data);
+      }).toList();
+    }
+
+    return backup;
   }
 }
